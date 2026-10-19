@@ -75,7 +75,10 @@ class ModelConfig:
     )
 
     # Hardware-specific execution flags
+    # Base Causal LM (Qwen2.5) uses PyTorch native SDPA;
+    # DeBERTa-v3 uses disentangled relative attention which requires "eager".
     attn_implementation: str = "sdpa"
+    evaluator_attn_implementation: str = "eager"
     use_fp16: bool = True
 
     # Sidecar evaluator fine-tuning / calibration settings

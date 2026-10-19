@@ -59,10 +59,11 @@ class MedicalIntentEvaluator:
 
         cache_dir = config.evaluator_cache_dir
         if self._is_cached_checkpoint(cache_dir):
-            self.tokenizer = AutoTokenizer.from_pretrained(str(cache_dir))
+            self.tokenizer = AutoTokenizer.from_pretrained(config.model.evaluator_model_id)
             self.model = AutoModelForSequenceClassification.from_pretrained(
                 str(cache_dir),
-                attn_implementation=config.model.attn_implementation,
+                dtype=torch.float32,
+                attn_implementation=config.model.evaluator_attn_implementation,
             ).to(self.device)
         else:
             self.tokenizer, self.model = self._bootstrap_and_finetune(cache_dir)
@@ -90,12 +91,15 @@ class MedicalIntentEvaluator:
         """
         model_id = self.config.model.evaluator_model_id
         tokenizer = AutoTokenizer.from_pretrained(model_id)
+        # DebertaV2ForSequenceClassification uses disentangled relative attention,
+        # which requires attn_implementation="eager" and FP32 precision.
         model = AutoModelForSequenceClassification.from_pretrained(
             model_id,
             num_labels=2,
             id2label={0: "SAFE_OR_REFUSAL", 1: "MEDICAL_ADVICE"},
             label2id={"SAFE_OR_REFUSAL": 0, "MEDICAL_ADVICE": 1},
-            attn_implementation=self.config.model.attn_implementation,
+            dtype=torch.float32,
+            attn_implementation=self.config.model.evaluator_attn_implementation,
         ).to(self.device)
 
         # Fine-tune in FP32 for numerical stability (takes ~3-5 seconds on GPU)

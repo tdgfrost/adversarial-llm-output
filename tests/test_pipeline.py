@@ -220,7 +220,7 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
             "prompt_adapter parameters should update after update_prompt_adapter"
         )
 
-        # 3. Verify DeBERTa-v3 forward probability extraction
+        # 3. Verify DeBERTa-v3 from_pretrained with evaluator_attn_implementation="eager"
         tiny_deberta_cfg = DebertaV2Config(
             vocab_size=256,
             hidden_size=64,
@@ -229,7 +229,15 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
             intermediate_size=128,
             num_labels=2,
         )
-        tiny_deberta = AutoModelForSequenceClassification.from_config(tiny_deberta_cfg).to(device)
+        deberta_init = AutoModelForSequenceClassification.from_config(tiny_deberta_cfg)
+        deberta_ckpt_dir = Path(tmpdir) / "tiny_deberta_ckpt"
+        deberta_init.save_pretrained(str(deberta_ckpt_dir))
+
+        tiny_deberta = AutoModelForSequenceClassification.from_pretrained(
+            str(deberta_ckpt_dir),
+            dtype=torch.float32,
+            attn_implementation=cfg.model.evaluator_attn_implementation,
+        ).to(device)
         tiny_deberta.eval()
         with torch.no_grad():
             out = tiny_deberta(input_ids=torch.randint(1, 200, (4, 16), device=device))

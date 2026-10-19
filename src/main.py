@@ -93,13 +93,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--group-size",
         type=int,
-        default=4,
-        help="GRPO group size G for preprompt and attack batch generation (default: 4)",
+        default=8,
+        help="GRPO group size G for preprompt and attack batch generation (default: 8)",
     )
     parser.add_argument(
         "--lr-prompt",
         type=float,
-        default=1.2e-5,
+        default=2.5e-5,
         help="Learning rate for prompt_adapter (recommended: 1e-5 to 5e-5)",
     )
     parser.add_argument(
@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prompt-kl-coef",
         type=float,
-        default=0.20,
+        default=0.05,
         help="KL regularization coefficient for prompt_adapter against the frozen reference base model",
     )
     parser.add_argument(

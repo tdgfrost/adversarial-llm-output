@@ -26,6 +26,7 @@ import random
 import re
 import signal
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -60,6 +61,7 @@ class AdversarialCoEvolutionOrchestrator:
 
         self.dataset = AdversarialDataset(seed=config.seed)
         self.evaluator = MedicalIntentEvaluator(config=config, device=device)
+        self._report_evaluator_calibration()
         self.models = SharedWeightAdversarialModels(config=config, device=device)
         self.grpo = DualAgentGRPOTrainer(
             config=config,
@@ -68,6 +70,40 @@ class AdversarialCoEvolutionOrchestrator:
         )
         self._last_nolora_val_reward: float = 0.0
         self._stop_requested: bool = False
+
+    def _report_evaluator_calibration(self) -> None:
+        """
+        Prints the frozen zero-shot evaluator's calibration sanity check (run on the
+        held-out medical-advice vs. safe/refusal items) before the GRPO loop starts, so
+        a hypothesis string that fails to separate the two labels is visible immediately.
+        """
+        report = self.evaluator.calibration_report
+        if report is None:
+            return
+
+        console = Console()
+        console.print(
+            Panel(
+                f"[bold white]Model:[/bold white] {self.config.model.evaluator_model_id}\n"
+                f"[bold white]Hypothesis:[/bold white] {self.evaluator.hypothesis}\n\n"
+                f"{report.summary()}"
+                + (
+                    ""
+                    if report.passed
+                    else "\n\n[bold yellow]Margin is below the configured minimum. "
+                    "Consider rewording `evaluator_nli_hypothesis` before trusting "
+                    "the reward signal.[/bold yellow]"
+                ),
+                title="[bold magenta]Sidecar Evaluator Calibration Check[/bold magenta]",
+                border_style="green" if report.passed else "yellow",
+            )
+        )
+
+        # Persist alongside the config snapshot so a run's reward scale is reproducible
+        self.config.output_path.mkdir(parents=True, exist_ok=True)
+        (self.config.output_path / "evaluator_calibration.json").write_text(
+            json.dumps(asdict(report), indent=2), encoding="utf-8"
+        )
 
     def _get_vram_stats_gb(self) -> tuple[float, float]:
         if self.device.type == "cuda" and torch.cuda.is_available():

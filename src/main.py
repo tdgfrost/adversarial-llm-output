@@ -57,8 +57,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--evaluator-model",
         type=str,
-        default="microsoft/deberta-v3-small",
-        help="Hugging Face model ID for the DeBERTa-v3 sidecar classifier (default: microsoft/deberta-v3-small)",
+        default="MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+        help=(
+            "Hugging Face model ID for the zero-shot NLI sidecar classifier "
+            "(default: MoritzLaurer/deberta-v3-base-zeroshot-v2.0)"
+        ),
     )
     parser.add_argument(
         "--num-steps",
@@ -138,8 +141,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preprompt-max-tokens",
         type=int,
-        default=96,
-        help="Fixed ceiling on generated tokens for defensive preprompts (default: 96)",
+        default=128,
+        help="Fixed ceiling on generated tokens for defensive preprompts (default: 128)",
     )
     parser.add_argument(
         "--attack-max-tokens",
@@ -150,8 +153,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--blue-max-tokens",
         type=int,
-        default=160,
-        help="Fixed ceiling on generated tokens for Model Blue single-turn responses (default: 160)",
+        default=256,
+        help="Fixed ceiling on generated tokens for Model Blue single-turn responses (default: 256)",
     )
     parser.add_argument(
         "--output-dir",

@@ -4,7 +4,8 @@ Guardrail Co-Evolution pipeline.
 
 Verifies:
 1. Dataset completeness (80 medical seeds, 80 benign health queries, epoch cycling).
-2. DeBERTa-v3 reward matrix math and benign utility anti-lobotomization scoring.
+2. Zero-shot NLI evaluator label resolution, calibration sanity check, reward matrix
+   math, and benign utility anti-lobotomization scoring.
 3. Dual-LoRA adapter isolation (`prompt_adapter` vs `red_adapter`), frozen `Model Blue`
    and `Non-LoRA Red` context switching, GRPO backpropagation with `GradScaler`,
    Rich Live dashboard updates, and TensorBoard/JSONL file output.
@@ -16,6 +17,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
@@ -110,6 +112,101 @@ def test_reward_and_utility_scoring_math() -> None:
     )
     expected_composite = 1.0 * torch.tensor([0.75, 0.25]) + cfg.utility_weight * benign_util
     assert torch.allclose(rewards["prompt_composite_rewards"], expected_composite)
+
+
+def test_nli_label_resolution_and_pair_scoring() -> None:
+    """
+    Verifies the zero-shot evaluator reads the entailment index from the checkpoint's
+    own `id2label` (binary `not_entailment` heads and 3-way MNLI heads), drops
+    `neutral` from the renormalized softmax, and encodes (response, hypothesis) pairs.
+    """
+    cfg = TrainingConfig()
+    device = torch.device("cpu")
+
+    def make_evaluator(id2label: dict) -> MedicalIntentEvaluator:
+        ev = object.__new__(MedicalIntentEvaluator)
+        ev.config = cfg
+        ev.device = device
+        ev.max_length = cfg.tokens.evaluator_max_length
+        ev.hypothesis = cfg.model.evaluator_nli_hypothesis
+        ev.model = SimpleNamespace(
+            config=SimpleNamespace(id2label=id2label, num_labels=len(id2label))
+        )
+        return ev
+
+    # zeroshot-v2.0 layout: entailment at index 0
+    binary_ev = make_evaluator({0: "entailment", 1: "not_entailment"})
+    assert binary_ev._resolve_nli_label_indices() == (0, [1])
+
+    # 3-way MNLI layout: `neutral` must be excluded from the renormalized softmax
+    mnli_ev = make_evaluator({0: "entailment", 1: "neutral", 2: "contradiction"})
+    assert mnli_ev._resolve_nli_label_indices() == (0, [2])
+
+    # Reversed layout: the index must follow `id2label`, not a hardcoded position
+    reversed_ev = make_evaluator({0: "not_entailment", 1: "entailment"})
+    assert reversed_ev._resolve_nli_label_indices() == (1, [0])
+
+    # Scoring: premises pair with the hypothesis, and P = softmax over {entail, contra}
+    captured: dict = {}
+
+    class _Encoding(dict):
+        def to(self, _device):
+            return self
+
+    def fake_tokenizer(premises, hypotheses, **kwargs):
+        captured["premises"] = premises
+        captured["hypotheses"] = hypotheses
+        captured["kwargs"] = kwargs
+        return _Encoding(batch=len(premises))
+
+    scorer = make_evaluator({0: "entailment", 1: "not_entailment"})
+    scorer.entail_index, scorer.contradiction_indices = scorer._resolve_nli_label_indices()
+    scorer.tokenizer = fake_tokenizer
+    scorer.model = lambda **enc: SimpleNamespace(
+        logits=torch.tensor([[4.0, -4.0], [-4.0, 4.0]], dtype=torch.float32)
+    )
+
+    probs = scorer.score_medical_advice_probability(["  Take 500mg now.  ", ""])
+    assert probs.shape == (2,)
+    assert float(probs[0]) > 0.95, f"Advice-like premise scored low: {probs[0]}"
+    assert float(probs[1]) < 0.05, f"Non-advice premise scored high: {probs[1]}"
+    assert captured["premises"] == ["Take 500mg now.", "..."]
+    assert captured["hypotheses"] == [cfg.model.evaluator_nli_hypothesis] * 2
+    assert captured["kwargs"]["max_length"] == cfg.tokens.evaluator_max_length
+    assert captured["kwargs"]["truncation"] == "only_first"
+
+    assert scorer.score_medical_advice_probability([]).shape == (0,)
+
+
+def test_calibration_sanity_check_separates_labels() -> None:
+    """
+    Verifies the startup sanity check aggregates the held-out calibration corpus into a
+    margin/AUROC report and flags a hypothesis that fails to separate the two labels.
+    """
+    cfg = TrainingConfig()
+    ev = object.__new__(MedicalIntentEvaluator)
+    ev.config = cfg
+    ev.device = torch.device("cpu")
+
+    labels = torch.tensor(
+        [int(item[1]) for item in EVALUATOR_CALIBRATION_DATA], dtype=torch.float32
+    )
+
+    # A perfectly separating evaluator: label 1 -> 0.9, label 0 -> 0.1
+    ev.score_medical_advice_probability = lambda texts: 0.1 + 0.8 * labels
+    good = ev.run_calibration_sanity_check()
+    assert good.num_advice + good.num_safe == len(EVALUATOR_CALIBRATION_DATA)
+    assert good.passed
+    assert good.margin > 0.75
+    assert good.accuracy_at_midpoint == 1.0
+    assert good.auroc > 0.99
+
+    # A collapsed evaluator (the failure mode of an untrained head) must not pass
+    ev.score_medical_advice_probability = lambda texts: torch.full_like(labels, 0.5)
+    collapsed = ev.run_calibration_sanity_check()
+    assert not collapsed.passed
+    assert abs(collapsed.margin) < 1e-6
+    assert abs(collapsed.auroc - 0.5) < 1e-6
 
 
 def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
@@ -220,7 +317,8 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
             "prompt_adapter parameters should update after update_prompt_adapter"
         )
 
-        # 3. Verify DeBERTa-v3 from_pretrained with evaluator_attn_implementation="eager"
+        # 3. Verify DebertaV2 sequence classification loads with
+        # evaluator_attn_implementation="eager" (required by its disentangled attention)
         tiny_deberta_cfg = DebertaV2Config(
             vocab_size=256,
             hidden_size=64,
@@ -471,6 +569,8 @@ def test_checkpoint_resume_and_extension() -> None:
 if __name__ == "__main__":
     test_dataset_completeness_and_sampling()
     test_reward_and_utility_scoring_math()
+    test_nli_label_resolution_and_pair_scoring()
+    test_calibration_sanity_check_separates_labels()
     test_dual_lora_grpo_and_dashboard_end_to_end()
     test_checkpoint_resume_and_extension()
     print("All unit, integration, and resume/extension tests passed successfully!")

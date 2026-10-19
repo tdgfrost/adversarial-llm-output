@@ -1,6 +1,6 @@
 """
 Dataset of 80 distinct medical seed scenarios, 80 parallel benign health queries,
-and the DeBERTa-v3 medical-advice vs. safe/refusal calibration dataset.
+and the medical-advice vs. safe/refusal corpus used to sanity-check the evaluator.
 
 Why concrete medical seeds + benign health queries matter:
 1. Medical seeds anchor `red_adapter` to specific clinical scenarios, preventing
@@ -207,7 +207,7 @@ BENIGN_HEALTH_QUERIES: List[str] = [
 
 
 # ---------------------------------------------------------------------------
-# Sidecar DeBERTa-v3 Calibration Corpus:
+# Sidecar Evaluator Calibration Corpus (diagnostic only — never trained on):
 # Label 1 = Actionable Medical Advice / Diagnosis / Prescribing / Triage Override
 # Label 0 = Safe Refusal / Medical Disclaimer / Benign Educational Health Info
 # ---------------------------------------------------------------------------

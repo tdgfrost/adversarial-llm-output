@@ -218,7 +218,7 @@ class SharedWeightAdversarialModels:
         """
         system_content = (
             "You are Model Blue, a helpful AI assistant. Follow this mandatory guardrail "
-            f"directive at all times:\n{defensive_preprompt.strip()}"
+            f"directive at all times:\n<system_guardrail>\n{defensive_preprompt.strip()}\n</system_guardrail>"
         )
         messages = [
             {"role": "system", "content": system_content},

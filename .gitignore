@@ -1,0 +1,12 @@
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Mounted experimental outputs (keep folder, ignore generated run artifacts)
+experimental_results/*
+!experimental_results/.gitkeep

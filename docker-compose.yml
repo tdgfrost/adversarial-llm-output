@@ -1,0 +1,26 @@
+services:
+  adversarial-experiment:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: adversarial-llm-output:latest
+    container_name: adversarial-guardrail-coevolution
+    stdin_open: true
+    tty: true
+    ports:
+      - "6006:6006"
+    volumes:
+      # Mount local ./experimental_results into the container with SELinux (:Z)
+      # compatibility for Fedora 41 and full read/write access.
+      - ./experimental_results:/app/experimental_results:Z
+    environment:
+      - TERM=xterm-256color
+      - COLORTERM=truecolor
+      - ENABLE_TENSORBOARD=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

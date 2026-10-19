@@ -1,0 +1,6 @@
+.git
+.pixi
+__pycache__
+*.pyc
+experimental_results/*
+!experimental_results/.gitkeep

@@ -1,0 +1,2 @@
+# Directory mounted into the Docker container at /app/experimental_results
+# Stores LoRA adapter checkpoints, TensorBoard event files, JSONL metrics, and dialogue samples.

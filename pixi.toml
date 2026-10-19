@@ -1,0 +1,42 @@
+[workspace]
+authors = ["tdgfrost <100413067+tdgfrost@users.noreply.github.com>"]
+channels = ["conda-forge"]
+name = "adversarial-llm-output"
+platforms = ["osx-arm64", "linux-64"]
+version = "0.1.0"
+
+[activation.env]
+KMP_DUPLICATE_LIB_OK = "TRUE"
+TOKENIZERS_PARALLELISM = "false"
+
+[tasks]
+train = "python -m src.main --output-dir ./experimental_results"
+smoke-test = "python -m src.main --num-steps 2 --group-size 2 --sample-interval 1 --output-dir ./experimental_results"
+test = "python -m tests.test_pipeline"
+tensorboard = "tensorboard --logdir ./experimental_results/tensorboard --host 0.0.0.0 --port 6006"
+docker-build = "docker build -t adversarial-llm-output:latest ."
+docker-run = "mkdir -p experimental_results && docker run --rm -it --gpus all -p 6006:6006 -v ./experimental_results:/app/experimental_results:Z adversarial-llm-output:latest"
+
+[dependencies]
+python = "==3.11"
+fsspec = "<=2026.6.0"
+huggingface_hub = ">=1.32.0,<2"
+numpy = ">=1.26.0,<3"
+sentencepiece = ">=0.2.0"
+protobuf = ">=4.25.0"
+
+[pypi-dependencies]
+transformers = ">=5.17.0, <6"
+peft = ">=0.14.0"
+accelerate = ">=1.2.0"
+rich = ">=13.9.0"
+tensorboard = ">=2.18.0"
+tiktoken = ">=0.8.0"
+
+# Development on Apple silicon
+[target.osx-arm64.pypi-dependencies]
+torch = ">=2.11.0, <3"
+
+# Deployment on the GPU box (Fedora 41 + NVIDIA TITAN RTX 24GB).
+[target.linux-64.pypi-dependencies]
+torch = { version = "==2.11.0", index = "https://download.pytorch.org/whl/cu128" }

@@ -96,7 +96,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lr-prompt",
         type=float,
-        default=2.5e-5,
+        default=1.2e-5,
         help="Learning rate for prompt_adapter (recommended: 1e-5 to 5e-5)",
     )
     parser.add_argument(
@@ -112,10 +112,16 @@ def parse_args() -> argparse.Namespace:
         help="Weight applied to Model Blue's benign utility score in the Prompt composite reward",
     )
     parser.add_argument(
-        "--kl-coef",
+        "--prompt-kl-coef",
         type=float,
-        default=0.02,
-        help="KL regularization coefficient against the frozen reference base model",
+        default=0.20,
+        help="KL regularization coefficient for prompt_adapter against the frozen reference base model",
+    )
+    parser.add_argument(
+        "--red-kl-coef",
+        type=float,
+        default=0.05,
+        help="KL regularization coefficient for red_adapter against the frozen reference base model",
     )
     parser.add_argument(
         "--sample-interval",
@@ -208,7 +214,8 @@ def main() -> None:
         lr_prompt=args.lr_prompt,
         lr_red=args.lr_red,
         utility_weight=args.utility_weight,
-        kl_coef=args.kl_coef,
+        prompt_kl_coef=args.prompt_kl_coef,
+        red_kl_coef=args.red_kl_coef,
         sample_refresh_interval=args.sample_interval,
         checkpoint_interval=args.checkpoint_interval,
         output_dir=args.output_dir,

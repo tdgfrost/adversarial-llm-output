@@ -173,11 +173,18 @@ class DualAgentGRPOTrainer:
         log_ref_diff = torch.clamp(ref_logps - policy_logps, min=-10.0, max=10.0)
         per_token_kl = torch.exp(log_ref_diff) - log_ref_diff - 1.0
 
+        # Select the correct KL penalty for the active adapter
+        active_kl_coef = (
+            self.config.prompt_kl_coef
+            if adapter_name == self.config.model.prompt_adapter_name
+            else self.config.red_kl_coef
+        )
+
         # 7. Mask strictly to generated completion tokens and normalize by sequence length
         mask = batch.completion_mask
         token_counts = mask.sum(dim=1).clamp(min=1.0)
 
-        per_token_loss = -(surrogate_obj - self.config.kl_coef * per_token_kl) * mask
+        per_token_loss = -(surrogate_obj - active_kl_coef * per_token_kl) * mask
         per_seq_loss = per_token_loss.sum(dim=1) / token_counts
         loss = per_seq_loss.mean()
 

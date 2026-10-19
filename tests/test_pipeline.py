@@ -294,8 +294,183 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
         assert parsed["step"] == 1
 
 
+def test_checkpoint_resume_and_extension() -> None:
+    """
+    Verifies full checkpoint save/load (`prompt_adapter`, `red_adapter`, optimizers,
+    GradScaler, dataset sampler state, RNG states), dashboard history truncation/resume,
+    and run extension (`--extend-steps` and `--num-steps`).
+    """
+    from src.trainer import AdversarialCoEvolutionOrchestrator
+
+    device = torch.device("cpu")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = TrainingConfig(
+            num_steps=4,
+            group_size=2,
+            output_dir=tmpdir,
+            use_live_ui=False,
+        )
+
+        def _make_mock_orchestrator(config: TrainingConfig) -> AdversarialCoEvolutionOrchestrator:
+            tiny_qwen_cfg = Qwen2Config(
+                vocab_size=256,
+                hidden_size=64,
+                intermediate_size=128,
+                num_hidden_layers=2,
+                num_attention_heads=4,
+                num_key_value_heads=2,
+                attn_implementation="sdpa",
+            )
+            base_model = AutoModelForCausalLM.from_config(tiny_qwen_cfg).to(device)
+            lora_cfg = LoraConfig(
+                r=4,
+                lora_alpha=8,
+                lora_dropout=0.0,
+                bias="none",
+                task_type=TaskType.CAUSAL_LM,
+                target_modules=list(config.model.lora_target_modules),
+            )
+            peft_model = get_peft_model(base_model, lora_cfg, adapter_name="prompt_adapter")
+            peft_model.add_adapter("red_adapter", lora_cfg)
+
+            models_wrapper = object.__new__(SharedWeightAdversarialModels)
+            models_wrapper.config = config
+            models_wrapper.device = device
+            models_wrapper.prompt_adapter_name = "prompt_adapter"
+            models_wrapper.red_adapter_name = "red_adapter"
+            models_wrapper.base_dtype = torch.float32
+            models_wrapper.model = peft_model
+            models_wrapper._cast_lora_parameters_to_fp32()
+
+            orch = object.__new__(AdversarialCoEvolutionOrchestrator)
+            orch.config = config
+            orch.device = device
+            orch.dataset = AdversarialDataset(seed=config.seed)
+            orch.models = models_wrapper
+            orch.grpo = DualAgentGRPOTrainer(config=config, models=models_wrapper, device=device)
+            orch._last_nolora_val_reward = 0.42
+            orch._stop_requested = False
+            return orch
+
+        orch1 = _make_mock_orchestrator(cfg)
+        # Advance dataset 2 steps and run 1 optimizer update on each adapter
+        orch1.dataset.sample_step(1)
+        orch1.dataset.sample_step(2)
+
+        dummy_batch = GenerationGroupBatch(
+            texts=["a", "b"],
+            full_ids=torch.randint(10, 200, (2, 10), device=device),
+            attention_mask=torch.ones((2, 10), dtype=torch.long, device=device),
+            completion_mask=torch.ones((2, 9), dtype=torch.float32, device=device),
+            prompt_len=4,
+        )
+        orch1.grpo.update_red_adapter(dummy_batch, torch.tensor([0.2, 0.8], device=device))
+        orch1.grpo.update_prompt_adapter(dummy_batch, torch.tensor([1.2, 0.6], device=device))
+
+        # Save checkpoint at step 2 of 4 (simulating an interrupted run at step 2/4)
+        orch1.save_checkpoint(step=2, total_steps=4, save_numbered=True)
+
+        saved_red = [
+            p.detach().clone() for p in orch1.models.get_adapter_parameters("red_adapter")
+        ]
+        saved_prompt = [
+            p.detach().clone() for p in orch1.models.get_adapter_parameters("prompt_adapter")
+        ]
+        next_expected_sample = orch1.dataset.sample_step(3)
+
+        # Write 3 lines to metrics.jsonl (where step 3 was an uncheckpointed orphan)
+        with ExperimentDashboard(config=cfg, device=device) as dash1:
+            for s in (1, 2, 3):
+                dash1.update_step(
+                    StepMetricsRecord(
+                        step=s,
+                        total_steps=4,
+                        step_time_sec=1.0,
+                        vram_allocated_gb=2.0,
+                        vram_max_gb=2.5,
+                        red_lora_reward=0.3 * s,
+                        red_nolora_val_reward=0.25,
+                        prompt_defense_score=0.7,
+                        prompt_utility_score=0.8,
+                        prompt_composite_reward=1.18,
+                        red_loss=0.1,
+                        red_kl=0.001,
+                        red_grad_norm=0.5,
+                        red_reward_std=0.1,
+                        prompt_loss=0.1,
+                        prompt_kl=0.001,
+                        prompt_grad_norm=0.5,
+                        prompt_reward_std=0.1,
+                    )
+                )
+
+        # Case 1: Auto-resume interrupted run (step 2 -> target 4)
+        orch2 = _make_mock_orchestrator(cfg)
+        resume_step, target_steps, ckpt_dir = orch2._resolve_run_bounds()
+        assert resume_step == 2
+        assert target_steps == 4
+        assert ckpt_dir is not None
+
+        # Verify restored adapter weights match saved weights & remain FP32
+        for p_saved, p_loaded in zip(
+            saved_red, orch2.models.get_adapter_parameters("red_adapter")
+        ):
+            assert p_loaded.dtype == torch.float32
+            assert torch.allclose(p_saved, p_loaded)
+        for p_saved, p_loaded in zip(
+            saved_prompt, orch2.models.get_adapter_parameters("prompt_adapter")
+        ):
+            assert p_loaded.dtype == torch.float32
+            assert torch.allclose(p_saved, p_loaded)
+
+        # Verify dataset continues from step 3 identically
+        resumed_sample = orch2.dataset.sample_step(3)
+        assert resumed_sample.seed_idx == next_expected_sample.seed_idx
+        assert resumed_sample.benign_idx == next_expected_sample.benign_idx
+
+        # Verify ExperimentDashboard truncates step 3 orphan and restores 2 steps of history
+        with ExperimentDashboard(
+            config=cfg, device=device, resume_step=resume_step, total_steps=target_steps
+        ) as dash2:
+            assert len(dash2.history["red_lora"]) == 2
+            assert dash2.latest_metrics is not None
+            assert dash2.latest_metrics.step == 2
+
+        lines_after_purge = (
+            (Path(tmpdir) / "metrics.jsonl").read_text(encoding="utf-8").strip().splitlines()
+        )
+        assert len(lines_after_purge) == 2
+
+        # Case 2: Extend run by +200 steps via --extend-steps 200 (step 2 -> target 202)
+        cfg_extend = TrainingConfig(
+            num_steps=4,
+            extend_steps=200,
+            group_size=2,
+            output_dir=tmpdir,
+            use_live_ui=False,
+        )
+        orch_ext = _make_mock_orchestrator(cfg_extend)
+        r_step, t_steps, _ = orch_ext._resolve_run_bounds()
+        assert r_step == 2
+        assert t_steps == 202
+
+        # Case 3: Extend run via explicit --num-steps 300 (step 2 -> target 300)
+        cfg_num = TrainingConfig(
+            num_steps=300,
+            num_steps_explicit=True,
+            group_size=2,
+            output_dir=tmpdir,
+            use_live_ui=False,
+        )
+        orch_num = _make_mock_orchestrator(cfg_num)
+        r_step2, t_steps2, _ = orch_num._resolve_run_bounds()
+        assert r_step2 == 2
+        assert t_steps2 == 300
+
+
 if __name__ == "__main__":
     test_dataset_completeness_and_sampling()
     test_reward_and_utility_scoring_math()
     test_dual_lora_grpo_and_dashboard_end_to_end()
-    print("All unit and end-to-end integration tests passed successfully!")
+    test_checkpoint_resume_and_extension()
+    print("All unit, integration, and resume/extension tests passed successfully!")

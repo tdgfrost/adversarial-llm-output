@@ -14,10 +14,14 @@ services:
       # compatibility for Fedora 41 and full read/write access.
       - ./experimental_results:/app/experimental_results:Z
       - ./src:/app/src:Z
+      - ./docker-entrypoint.sh:/app/docker-entrypoint.sh:Z
     environment:
       - TERM=xterm-256color
       - COLORTERM=truecolor
       - ENABLE_TENSORBOARD=1
+      - NUM_STEPS=${NUM_STEPS:-100}
+      - EXTEND_STEPS=${EXTEND_STEPS:-0}
+      - FRESH_RUN=${FRESH_RUN:-0}
     deploy:
       resources:
         reservations:

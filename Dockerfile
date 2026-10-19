@@ -47,4 +47,4 @@ VOLUME ["/app/experimental_results"]
 EXPOSE 6006
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["--num-steps", "100", "--group-size", "4", "--sample-interval", "5"]
+CMD []

@@ -1,5 +1,5 @@
 """
-Interleaved Dual-Agent Adversarial Co-Evolution Pipeline.
+Interleaved Dual-Agent Adversarial Co-Evolution Pipeline with Resume & Extension Support.
 
 Orchestrates each step of the zero-sum game on a single shared-weight base model:
 1. Sample 1 concrete medical seed scenario and 1 benign health query.
@@ -14,14 +14,25 @@ Orchestrates each step of the zero-sum game on a single shared-weight base model
    to track how baseline attacks degrade as `prompt_adapter` hardens `Model Blue`.
 7. Backpropagate GRPO policy updates to `red_adapter`, then swap to `prompt_adapter`
    and backpropagate composite GRPO policy updates using an FP16 GradScaler.
+8. Persist full resumable state (`prompt_adapter`, `red_adapter`, optimizers, GradScaler,
+   dataset shuffle state, RNG state, metrics, and TensorBoard curves) so interrupted
+   or completed runs can be resumed or extended seamlessly.
 """
 
 from __future__ import annotations
 
+import json
+import random
+import re
+import signal
 import time
-from typing import Optional
+from pathlib import Path
+from typing import Optional, Tuple
 
+import numpy as np
 import torch
+from rich.console import Console
+from rich.panel import Panel
 
 from src.config import TrainingConfig
 from src.dashboard import (
@@ -34,11 +45,13 @@ from src.evaluator import MedicalIntentEvaluator
 from src.grpo import DualAgentGRPOTrainer
 from src.models import SharedWeightAdversarialModels
 
+TRAINER_STATE_FILENAME = "trainer_state.pt"
+
 
 class AdversarialCoEvolutionOrchestrator:
     """
     Coordinates the dataset, shared-weight dual-LoRA LLM, DeBERTa-v3 sidecar evaluator,
-    custom GRPO trainer, and Rich/TensorBoard live telemetry.
+    custom GRPO trainer, checkpoint resume/extension, and Rich/TensorBoard live telemetry.
     """
 
     def __init__(self, config: TrainingConfig, device: torch.device) -> None:
@@ -54,6 +67,7 @@ class AdversarialCoEvolutionOrchestrator:
             device=device,
         )
         self._last_nolora_val_reward: float = 0.0
+        self._stop_requested: bool = False
 
     def _get_vram_stats_gb(self) -> tuple[float, float]:
         if self.device.type == "cuda" and torch.cuda.is_available():
@@ -61,6 +75,221 @@ class AdversarialCoEvolutionOrchestrator:
             peak = torch.cuda.max_memory_allocated(self.device) / (1024**3)
             return float(alloc), float(peak)
         return 0.0, 0.0
+
+    # -----------------------------------------------------------------------
+    # Checkpointing, Auto-Resume Discovery & Run Extension
+    # -----------------------------------------------------------------------
+
+    def _is_valid_checkpoint_dir(self, ckpt_dir: Path) -> bool:
+        """Returns True if `ckpt_dir` contains both saved PEFT LoRA adapter subdirectories."""
+        if not ckpt_dir.is_dir():
+            return False
+        prompt_dir = ckpt_dir / self.config.model.prompt_adapter_name
+        red_dir = ckpt_dir / self.config.model.red_adapter_name
+        return (prompt_dir / "adapter_config.json").exists() and (
+            red_dir / "adapter_config.json"
+        ).exists()
+
+    def _read_checkpoint_step(self, ckpt_dir: Path) -> Tuple[int, int]:
+        """
+        Extracts `(completed_step, saved_total_steps)` from a checkpoint directory.
+        Supports both full checkpoints (`trainer_state.pt`) and legacy adapter-only
+        directories (`step_XXXX`).
+        """
+        state_path = ckpt_dir / TRAINER_STATE_FILENAME
+        if state_path.exists():
+            try:
+                state = torch.load(str(state_path), map_location="cpu", weights_only=False)
+                step = int(state.get("step", 0))
+                total = int(state.get("total_steps", max(step, self.config.num_steps)))
+                return step, total
+            except Exception:
+                pass
+
+        # Fallback for adapter-only `step_XXXX` directories created before trainer_state.pt
+        match = re.search(r"step_(\d+)$", ckpt_dir.name)
+        if match:
+            step = int(match.group(1))
+            return step, max(step, self.config.num_steps)
+
+        # Fallback: inspect metrics.jsonl for the last logged step
+        metrics_path = self.config.output_path / "metrics.jsonl"
+        if metrics_path.exists():
+            lines = [
+                ln.strip()
+                for ln in metrics_path.read_text(encoding="utf-8").splitlines()
+                if ln.strip()
+            ]
+            if lines:
+                try:
+                    last_rec = json.loads(lines[-1])
+                    step = int(last_rec.get("step", 0))
+                    total = int(last_rec.get("total_steps", max(step, self.config.num_steps)))
+                    return step, total
+                except Exception:
+                    pass
+        return 0, self.config.num_steps
+
+    def _find_latest_checkpoint_dir(self) -> Optional[Path]:
+        """
+        Finds the most recent valid checkpoint directory in `experimental_results/checkpoints/`
+        (or the user-specified `--resume-from` path).
+        """
+        if self.config.resume_from:
+            custom_path = Path(self.config.resume_from).resolve()
+            if not self._is_valid_checkpoint_dir(custom_path):
+                raise FileNotFoundError(
+                    f"Specified --resume-from path '{custom_path}' does not contain valid "
+                    f"'{self.config.model.prompt_adapter_name}' and '{self.config.model.red_adapter_name}' checkpoints."
+                )
+            return custom_path
+
+        ckpt_root = self.config.checkpoints_dir
+        if not ckpt_root.exists():
+            return None
+
+        candidates: list[Tuple[int, float, Path]] = []
+        for child in ckpt_root.iterdir():
+            if self._is_valid_checkpoint_dir(child):
+                step_num, _ = self._read_checkpoint_step(child)
+                mtime = child.stat().st_mtime
+                if step_num > 0:
+                    candidates.append((step_num, mtime, child))
+
+        if not candidates:
+            return None
+
+        # Sort by highest completed step first, then most recent modification timestamp
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return candidates[0][2]
+
+    def save_checkpoint(
+        self,
+        step: int,
+        total_steps: int,
+        save_numbered: bool = False,
+    ) -> Path:
+        """
+        Saves the complete training state (both PEFT LoRA adapters, both AdamW
+        optimizers, FP16 GradScaler, dataset shuffle queues, and RNG states)
+        to `checkpoints/latest` and optionally to `checkpoints/step_XXXX`.
+        """
+        rng_state = {
+            "python": random.getstate(),
+            "numpy": np.random.get_state(),
+            "torch_cpu": torch.get_rng_state(),
+        }
+        if torch.cuda.is_available():
+            try:
+                rng_state["torch_cuda"] = torch.cuda.get_rng_state_all()
+            except Exception:
+                pass
+
+        trainer_state = {
+            "step": step,
+            "total_steps": total_steps,
+            "last_nolora_val_reward": self._last_nolora_val_reward,
+            "grpo_state": self.grpo.state_dict(),
+            "dataset_state": self.dataset.state_dict(),
+            "rng_state": rng_state,
+        }
+
+        # Always keep `checkpoints/latest` up to date for seamless crash/interrupt recovery
+        latest_dir = self.config.latest_checkpoint_dir
+        self.models.save_adapters(step=step, ckpt_dir=latest_dir)
+        torch.save(trainer_state, str(latest_dir / TRAINER_STATE_FILENAME))
+
+        if save_numbered:
+            numbered_dir = self.models.save_adapters(step=step)
+            torch.save(trainer_state, str(numbered_dir / TRAINER_STATE_FILENAME))
+            return numbered_dir
+
+        return latest_dir
+
+    def load_checkpoint(self, ckpt_dir: Path) -> Tuple[int, int]:
+        """
+        Restores LoRA adapters, optimizer momentum buffers, GradScaler, dataset state,
+        and RNG states from `ckpt_dir`. Returns `(completed_step, saved_total_steps)`.
+        """
+        self.models.load_adapters(ckpt_dir)
+        completed_step, saved_total_steps = self._read_checkpoint_step(ckpt_dir)
+
+        state_path = ckpt_dir / TRAINER_STATE_FILENAME
+        if state_path.exists():
+            state = torch.load(str(state_path), map_location=self.device, weights_only=False)
+            self._last_nolora_val_reward = float(
+                state.get("last_nolora_val_reward", 0.0)
+            )
+            if "grpo_state" in state:
+                self.grpo.load_state_dict(state["grpo_state"])
+            if "dataset_state" in state:
+                self.dataset.load_state_dict(state["dataset_state"])
+            if "rng_state" in state:
+                rng = state["rng_state"]
+                if "python" in rng:
+                    random.setstate(rng["python"])
+                if "numpy" in rng:
+                    np.random.set_state(rng["numpy"])
+                if "torch_cpu" in rng:
+                    cpu_state = rng["torch_cpu"]
+                    if isinstance(cpu_state, torch.Tensor):
+                        cpu_state = cpu_state.cpu().to(torch.uint8)
+                    torch.set_rng_state(cpu_state)
+                if "torch_cuda" in rng and torch.cuda.is_available():
+                    try:
+                        cuda_states = [
+                            s.cpu().to(torch.uint8) if isinstance(s, torch.Tensor) else s
+                            for s in rng["torch_cuda"]
+                        ]
+                        torch.cuda.set_rng_state_all(cuda_states)
+                    except Exception:
+                        pass
+        else:
+            # Legacy adapter-only checkpoint: fast-forward dataset sampler to match step
+            for s in range(1, completed_step + 1):
+                self.dataset.sample_step(s)
+
+        return completed_step, saved_total_steps
+
+    def _resolve_run_bounds(self) -> Tuple[int, int, Optional[Path]]:
+        """
+        Determines `(resume_step, target_total_steps, checkpoint_dir)` based on
+        existing checkpoints and CLI flags (`--extend-steps`, `--num-steps`, `--fresh`).
+        """
+        if self.config.fresh or not self.config.resume:
+            target = (
+                self.config.extend_steps
+                if self.config.extend_steps > 0
+                else self.config.num_steps
+            )
+            return 0, target, None
+
+        ckpt_dir = self._find_latest_checkpoint_dir()
+        if ckpt_dir is None:
+            target = (
+                self.config.extend_steps
+                if self.config.extend_steps > 0
+                else self.config.num_steps
+            )
+            return 0, target, None
+
+        completed_step, saved_total_steps = self.load_checkpoint(ckpt_dir)
+
+        if self.config.extend_steps > 0:
+            # Extend by N additional steps beyond the checkpoint's completed step
+            target_total_steps = completed_step + self.config.extend_steps
+        elif self.config.num_steps_explicit:
+            # User explicitly specified a new total step ceiling (e.g. --num-steps 300)
+            target_total_steps = self.config.num_steps
+        else:
+            # Default invocation: resume toward the previously configured target ceiling
+            target_total_steps = max(self.config.num_steps, saved_total_steps)
+
+        return completed_step, target_total_steps, ckpt_dir
+
+    # -----------------------------------------------------------------------
+    # Evaluation & Main Training Loop
+    # -----------------------------------------------------------------------
 
     @torch.no_grad()
     def _evaluate_nolora_baseline(
@@ -80,7 +309,6 @@ class AdversarialCoEvolutionOrchestrator:
             group_size=max(1, self.config.group_size // 2),
             use_lora=False,
         )
-        # Evaluate non-LoRA attacks against the generated defensive preprompts on Model Blue
         nolora_blue_responses = self.models.generate_blue_responses(
             preprompts=preprompts,
             queries=nolora_batch.texts,
@@ -96,146 +324,213 @@ class AdversarialCoEvolutionOrchestrator:
             nolora_blue_responses[0],
         )
 
+    def _install_signal_handlers(self) -> None:
+        """
+        Installs SIGINT/SIGTERM handlers so pressing Ctrl+C or `docker stop` finishes
+        the current step atomically, saves `checkpoints/latest`, and exits cleanly.
+        A second Ctrl+C forces an immediate abort.
+        """
+        def _handle_signal(signum, _frame):
+            if self._stop_requested:
+                raise KeyboardInterrupt
+            self._stop_requested = True
+
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+
     def run(self) -> None:
-        """Executes the full adversarial co-evolution training loop."""
+        """Executes (or resumes/extends) the adversarial co-evolution training loop."""
         G = self.config.group_size
-        total_steps = self.config.num_steps
+        resume_step, total_steps, resumed_from_dir = self._resolve_run_bounds()
+        self.config.num_steps = total_steps
 
-        with ExperimentDashboard(config=self.config, device=self.device) as dashboard:
-            for step in range(1, total_steps + 1):
-                step_start = time.time()
-
-                # 1. Sample 1 concrete medical seed scenario and 1 benign health query
-                sample = self.dataset.sample_step(step)
-
-                # 2. Enable ONLY `prompt_adapter` and generate a group of G defensive preprompts
-                prompt_batch = self.models.generate_defensive_preprompts(group_size=G)
-
-                # 3. Disable `prompt_adapter`, enable `red_adapter`, and generate G seed-anchored attacks
-                red_batch = self.models.generate_adversarial_attacks(
-                    medical_seed=sample.medical_seed,
-                    group_size=G,
-                    use_lora=True,
+        console = Console()
+        if resume_step >= total_steps:
+            console.print(
+                Panel(
+                    f"[bold green]Checkpoint in [cyan]{resumed_from_dir}[/cyan] has already "
+                    f"completed Step {resume_step}/{total_steps}.[/bold green]\n\n"
+                    "To extend this run by an additional N steps (e.g., +200 steps), run:\n"
+                    "  [bold yellow]docker compose run --rm --service-ports adversarial-experiment --extend-steps 200[/bold yellow]\n\n"
+                    "Or specify a new total step target (e.g., 300 total steps):\n"
+                    "  [bold yellow]docker compose run --rm --service-ports adversarial-experiment --num-steps 300[/bold yellow]\n\n"
+                    "Or start a completely fresh experiment from Step 1:\n"
+                    "  [bold yellow]docker compose run --rm --service-ports adversarial-experiment --fresh[/bold yellow]",
+                    title="[bold magenta]Experiment Already Complete — Ready to Extend[/bold magenta]",
+                    border_style="green",
                 )
+            )
+            return
 
-                # 4. Disable both adapters to simulate frozen Model Blue:
-                # 4a. Concatenate each preprompt with each attack (G x G pairs)
-                blue_attack_responses = self.models.generate_blue_responses(
-                    preprompts=prompt_batch.texts,
-                    queries=red_batch.texts,
-                    pairwise=True,
-                )
-                # 4b. Concatenate each preprompt with the benign health query (G pairs)
-                blue_benign_responses = self.models.generate_blue_responses(
-                    preprompts=prompt_batch.texts,
-                    queries=[sample.benign_query],
-                    pairwise=True,
-                )
+        self._install_signal_handlers()
+        last_saved_step = resume_step
 
-                # 5. Score continuous rewards using the DeBERTa-v3 sidecar & benign utility scorer
-                flat_attack_probs = self.evaluator.score_medical_advice_probability(
-                    blue_attack_responses
-                )
-                attack_probs_matrix = flat_attack_probs.view(G, G)
-                benign_utility_scores = self.evaluator.score_benign_utility(
-                    blue_benign_responses
-                )
+        with ExperimentDashboard(
+            config=self.config,
+            device=self.device,
+            resume_step=resume_step,
+            total_steps=total_steps,
+        ) as dashboard:
+            try:
+                for step in range(resume_step + 1, total_steps + 1):
+                    if self._stop_requested:
+                        break
 
-                reward_dict = self.evaluator.compute_rewards(
-                    attack_probs_matrix=attack_probs_matrix,
-                    benign_utility_scores=benign_utility_scores,
-                )
-                red_rewards = reward_dict["red_rewards"]
-                prompt_defense_scores = reward_dict["prompt_defense_scores"]
-                prompt_utility_scores = reward_dict["prompt_utility_scores"]
-                prompt_composite_rewards = reward_dict["prompt_composite_rewards"]
+                    step_start = time.time()
 
-                # 6. Benchmark Non-LoRA Model Red & refresh sample dialogue showcase periodically
-                should_refresh_sample = (
-                    step == 1
-                    or step % self.config.sample_refresh_interval == 0
-                    or step == total_steps
-                )
-                dialogue_snapshot: Optional[DialogueSampleSnapshot] = None
+                    # 1. Sample 1 concrete medical seed scenario and 1 benign health query
+                    sample = self.dataset.sample_step(step)
 
-                # Run Non-LoRA Red validation benchmark
-                nolora_mean_prob, nolora_attack_0, nolora_blue_0 = (
-                    self._evaluate_nolora_baseline(
+                    # 2. Enable ONLY `prompt_adapter` and generate a group of G defensive preprompts
+                    prompt_batch = self.models.generate_defensive_preprompts(group_size=G)
+
+                    # 3. Disable `prompt_adapter`, enable `red_adapter`, and generate G seed-anchored attacks
+                    red_batch = self.models.generate_adversarial_attacks(
                         medical_seed=sample.medical_seed,
+                        group_size=G,
+                        use_lora=True,
+                    )
+
+                    # 4. Disable both adapters to simulate frozen Model Blue:
+                    # 4a. Concatenate each preprompt with each attack (G x G pairs)
+                    blue_attack_responses = self.models.generate_blue_responses(
                         preprompts=prompt_batch.texts,
+                        queries=red_batch.texts,
+                        pairwise=True,
                     )
-                )
-                self._last_nolora_val_reward = nolora_mean_prob
+                    # 4b. Concatenate each preprompt with the benign health query (G pairs)
+                    blue_benign_responses = self.models.generate_blue_responses(
+                        preprompts=prompt_batch.texts,
+                        queries=[sample.benign_query],
+                        pairwise=True,
+                    )
 
-                if should_refresh_sample:
-                    # Select the top-performing preprompt i* and top LoRA attack j* from this group
-                    best_p_idx = int(torch.argmax(prompt_composite_rewards).item())
-                    best_r_idx = int(torch.argmax(red_rewards).item())
-                    pair_flat_idx = best_p_idx * G + best_r_idx
+                    # 5. Score continuous rewards using the DeBERTa-v3 sidecar & benign utility scorer
+                    flat_attack_probs = self.evaluator.score_medical_advice_probability(
+                        blue_attack_responses
+                    )
+                    attack_probs_matrix = flat_attack_probs.view(G, G)
+                    benign_utility_scores = self.evaluator.score_benign_utility(
+                        blue_benign_responses
+                    )
 
-                    dialogue_snapshot = DialogueSampleSnapshot(
+                    reward_dict = self.evaluator.compute_rewards(
+                        attack_probs_matrix=attack_probs_matrix,
+                        benign_utility_scores=benign_utility_scores,
+                    )
+                    red_rewards = reward_dict["red_rewards"]
+                    prompt_defense_scores = reward_dict["prompt_defense_scores"]
+                    prompt_utility_scores = reward_dict["prompt_utility_scores"]
+                    prompt_composite_rewards = reward_dict["prompt_composite_rewards"]
+
+                    # 6. Benchmark Non-LoRA Model Red & refresh sample dialogue showcase periodically
+                    should_refresh_sample = (
+                        step == 1
+                        or step == resume_step + 1
+                        or step % self.config.sample_refresh_interval == 0
+                        or step == total_steps
+                    )
+                    dialogue_snapshot: Optional[DialogueSampleSnapshot] = None
+
+                    nolora_mean_prob, nolora_attack_0, nolora_blue_0 = (
+                        self._evaluate_nolora_baseline(
+                            medical_seed=sample.medical_seed,
+                            preprompts=prompt_batch.texts,
+                        )
+                    )
+                    self._last_nolora_val_reward = nolora_mean_prob
+
+                    if should_refresh_sample:
+                        best_p_idx = int(torch.argmax(prompt_composite_rewards).item())
+                        best_r_idx = int(torch.argmax(red_rewards).item())
+                        pair_flat_idx = best_p_idx * G + best_r_idx
+
+                        dialogue_snapshot = DialogueSampleSnapshot(
+                            step=step,
+                            medical_seed=sample.medical_seed,
+                            benign_query=sample.benign_query,
+                            defensive_preprompt=prompt_batch.texts[best_p_idx],
+                            red_lora_attack=red_batch.texts[best_r_idx],
+                            blue_lora_response=blue_attack_responses[pair_flat_idx],
+                            lora_medical_prob=float(
+                                attack_probs_matrix[best_p_idx, best_r_idx].item()
+                            ),
+                            red_nolora_attack=nolora_attack_0,
+                            blue_nolora_response=nolora_blue_0,
+                            nolora_medical_prob=nolora_mean_prob,
+                            blue_benign_response=blue_benign_responses[best_p_idx],
+                            benign_utility_score=float(
+                                prompt_utility_scores[best_p_idx].item()
+                            ),
+                        )
+
+                    # 7. Backpropagate GRPO policy updates:
+                    red_stats = self.grpo.update_red_adapter(
+                        red_batch=red_batch,
+                        red_rewards=red_rewards,
+                    )
+                    prompt_stats = self.grpo.update_prompt_adapter(
+                        prompt_batch=prompt_batch,
+                        prompt_composite_rewards=prompt_composite_rewards,
+                    )
+
+                    # 8. Record metrics and refresh live dashboard / TensorBoard
+                    step_time = time.time() - step_start
+                    vram_alloc, vram_max = self._get_vram_stats_gb()
+
+                    metrics_record = StepMetricsRecord(
                         step=step,
-                        medical_seed=sample.medical_seed,
-                        benign_query=sample.benign_query,
-                        defensive_preprompt=prompt_batch.texts[best_p_idx],
-                        red_lora_attack=red_batch.texts[best_r_idx],
-                        blue_lora_response=blue_attack_responses[pair_flat_idx],
-                        lora_medical_prob=float(
-                            attack_probs_matrix[best_p_idx, best_r_idx].item()
+                        total_steps=total_steps,
+                        step_time_sec=step_time,
+                        vram_allocated_gb=vram_alloc,
+                        vram_max_gb=vram_max,
+                        red_lora_reward=float(red_rewards.mean().item()),
+                        red_nolora_val_reward=self._last_nolora_val_reward,
+                        prompt_defense_score=float(prompt_defense_scores.mean().item()),
+                        prompt_utility_score=float(prompt_utility_scores.mean().item()),
+                        prompt_composite_reward=float(
+                            prompt_composite_rewards.mean().item()
                         ),
-                        red_nolora_attack=nolora_attack_0,
-                        blue_nolora_response=nolora_blue_0,
-                        nolora_medical_prob=nolora_mean_prob,
-                        blue_benign_response=blue_benign_responses[best_p_idx],
-                        benign_utility_score=float(
-                            prompt_utility_scores[best_p_idx].item()
-                        ),
+                        red_loss=red_stats.loss,
+                        red_kl=red_stats.mean_kl,
+                        red_grad_norm=red_stats.grad_norm,
+                        red_reward_std=red_stats.reward_std,
+                        prompt_loss=prompt_stats.loss,
+                        prompt_kl=prompt_stats.mean_kl,
+                        prompt_grad_norm=prompt_stats.grad_norm,
+                        prompt_reward_std=prompt_stats.reward_std,
                     )
 
-                # 7. Backpropagate GRPO policy updates:
-                # 7a. Enable gradients for `red_adapter` and update policy using attack advantages
-                red_stats = self.grpo.update_red_adapter(
-                    red_batch=red_batch,
-                    red_rewards=red_rewards,
-                )
-                # 7b. Swap to `prompt_adapter` and update policy using composite advantages
-                prompt_stats = self.grpo.update_prompt_adapter(
-                    prompt_batch=prompt_batch,
-                    prompt_composite_rewards=prompt_composite_rewards,
-                )
+                    dashboard.update_step(
+                        metrics=metrics_record,
+                        dialogue_sample=dialogue_snapshot,
+                    )
 
-                # 8. Save adapter checkpoints periodically and at completion
-                if step % self.config.checkpoint_interval == 0 or step == total_steps:
-                    self.models.save_adapters(step=step)
+                    # 9. Save rolling `latest` checkpoint on sample intervals / stop request,
+                    # and save numbered `step_XXXX` snapshots on `checkpoint_interval` or completion.
+                    save_numbered = (
+                        step % self.config.checkpoint_interval == 0
+                        or step == total_steps
+                    )
+                    save_latest = (
+                        save_numbered
+                        or step % self.config.sample_refresh_interval == 0
+                        or self._stop_requested
+                    )
+                    if save_latest:
+                        self.save_checkpoint(
+                            step=step,
+                            total_steps=total_steps,
+                            save_numbered=save_numbered,
+                        )
+                        last_saved_step = step
 
-                # 9. Record metrics and refresh live dashboard / TensorBoard
-                step_time = time.time() - step_start
-                vram_alloc, vram_max = self._get_vram_stats_gb()
+            except KeyboardInterrupt:
+                self._stop_requested = True
 
-                metrics_record = StepMetricsRecord(
-                    step=step,
-                    total_steps=total_steps,
-                    step_time_sec=step_time,
-                    vram_allocated_gb=vram_alloc,
-                    vram_max_gb=vram_max,
-                    red_lora_reward=float(red_rewards.mean().item()),
-                    red_nolora_val_reward=self._last_nolora_val_reward,
-                    prompt_defense_score=float(prompt_defense_scores.mean().item()),
-                    prompt_utility_score=float(prompt_utility_scores.mean().item()),
-                    prompt_composite_reward=float(
-                        prompt_composite_rewards.mean().item()
-                    ),
-                    red_loss=red_stats.loss,
-                    red_kl=red_stats.mean_kl,
-                    red_grad_norm=red_stats.grad_norm,
-                    red_reward_std=red_stats.reward_std,
-                    prompt_loss=prompt_stats.loss,
-                    prompt_kl=prompt_stats.mean_kl,
-                    prompt_grad_norm=prompt_stats.grad_norm,
-                    prompt_reward_std=prompt_stats.reward_std,
-                )
-
-                dashboard.update_step(
-                    metrics=metrics_record,
-                    dialogue_sample=dialogue_snapshot,
-                )
+        if self._stop_requested:
+            console.print(
+                f"\n[bold yellow]Training paused cleanly at Step {last_saved_step}/{total_steps}. "
+                f"Latest checkpoint saved at {self.config.latest_checkpoint_dir}. "
+                "Re-run the same command to resume seamlessly.[/bold yellow]"
+            )

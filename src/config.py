@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Tuple
+from typing import Any, Optional, Tuple
 
 
 @dataclass
@@ -96,6 +96,13 @@ class TrainingConfig:
     num_steps: int = 100
     group_size: int = 4  # Number of preprompts (G) and attacks (G) generated per step
 
+    # Resume / Extension settings
+    resume: bool = True
+    fresh: bool = False
+    extend_steps: int = 0
+    resume_from: Optional[str] = None
+    num_steps_explicit: bool = False
+
     # Optimizer settings (1e-5 to 5e-5 as specified for stable FP16 LoRA updates)
     lr_prompt: float = 2.5e-5
     lr_red: float = 2.5e-5
@@ -144,6 +151,10 @@ class TrainingConfig:
     @property
     def checkpoints_dir(self) -> Path:
         return self.output_path / "checkpoints"
+
+    @property
+    def latest_checkpoint_dir(self) -> Path:
+        return self.checkpoints_dir / "latest"
 
     @property
     def evaluator_cache_dir(self) -> Path:

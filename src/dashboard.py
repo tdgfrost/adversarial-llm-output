@@ -103,9 +103,17 @@ class ExperimentDashboard:
     TensorBoard SummaryWriter, and JSONL file logging inside `experimental_results/`.
     """
 
-    def __init__(self, config: TrainingConfig, device: torch.device) -> None:
+    def __init__(
+        self,
+        config: TrainingConfig,
+        device: torch.device,
+        resume_step: int = 0,
+        total_steps: Optional[int] = None,
+    ) -> None:
         self.config = config
         self.device = device
+        self.resume_step = resume_step
+        self.target_total_steps = total_steps or config.num_steps
         self.start_time = time.time()
 
         # Ensure output directories exist
@@ -122,9 +130,6 @@ class ExperimentDashboard:
         config_snapshot_path.write_text(
             json.dumps(self.config.to_dict(), indent=2), encoding="utf-8"
         )
-
-        # Initialize TensorBoard writer
-        self.tb_writer = SummaryWriter(log_dir=str(self.config.tensorboard_dir))
 
         # Metric histories for moving averages and sparklines
         win = config.moving_avg_window
@@ -143,8 +148,62 @@ class ExperimentDashboard:
         self.latest_dialogue: Optional[DialogueSampleSnapshot] = None
         self.initial_nolora_reward: Optional[float] = None
 
+        if self.resume_step > 0:
+            self._restore_history_up_to_step(self.resume_step, self.target_total_steps)
+            self.tb_writer = SummaryWriter(
+                log_dir=str(self.config.tensorboard_dir),
+                purge_step=self.resume_step + 1,
+            )
+        else:
+            if self.config.fresh and self.metrics_jsonl_path.exists():
+                self.metrics_jsonl_path.unlink()
+            self.tb_writer = SummaryWriter(log_dir=str(self.config.tensorboard_dir))
+
         self.console = Console(force_terminal=config.use_live_ui)
         self.live: Optional[Live] = None
+
+    def _restore_history_up_to_step(self, resume_step: int, total_steps: int) -> None:
+        """
+        Restores metric histories, moving average windows, initial baseline reward,
+        and latest dialogue snapshot from `experimental_results/` up to `resume_step`.
+        Truncates any uncheckpointed records after `resume_step` so resumed logs stay aligned.
+        """
+        if self.metrics_jsonl_path.exists():
+            kept_lines: List[str] = []
+            for raw_line in self.metrics_jsonl_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                step_val = int(data.get("step", 0))
+                if step_val <= resume_step:
+                    kept_lines.append(line)
+                    if self.initial_nolora_reward is None and "red_nolora_val_reward" in data:
+                        self.initial_nolora_reward = float(data["red_nolora_val_reward"])
+                    self._push_metric("red_lora", float(data.get("red_lora_reward", 0.0)))
+                    self._push_metric("red_nolora", float(data.get("red_nolora_val_reward", 0.0)))
+                    self._push_metric("defense", float(data.get("prompt_defense_score", 0.0)))
+                    self._push_metric("utility", float(data.get("prompt_utility_score", 0.0)))
+                    self._push_metric("composite", float(data.get("prompt_composite_reward", 0.0)))
+                    data["total_steps"] = total_steps
+                    self.latest_metrics = StepMetricsRecord(**data)
+
+            self.metrics_jsonl_path.write_text(
+                ("\n".join(kept_lines) + "\n") if kept_lines else "",
+                encoding="utf-8",
+            )
+
+        if self.latest_sample_json_path.exists():
+            try:
+                sample_data = json.loads(
+                    self.latest_sample_json_path.read_text(encoding="utf-8")
+                )
+                self.latest_dialogue = DialogueSampleSnapshot(**sample_data)
+            except (json.JSONDecodeError, TypeError, KeyError):
+                pass
 
     def __enter__(self) -> "ExperimentDashboard":
         if self.config.use_live_ui:
@@ -319,10 +378,17 @@ class ExperimentDashboard:
             pct = 100.0 * m.step / max(1, m.total_steps)
             filled = int(round(28 * m.step / max(1, m.total_steps)))
             bar = "█" * filled + "░" * (28 - filled)
-            eta = (elapsed / max(1, m.step)) * (m.total_steps - m.step)
+            session_steps = max(1, m.step - self.resume_step)
+            remaining_steps = max(0, m.total_steps - m.step)
+            eta = (elapsed / session_steps) * remaining_steps
+            resume_tag = (
+                f" [bold yellow](Resumed @ {self.resume_step})[/bold yellow]"
+                if self.resume_step > 0
+                else ""
+            )
             progress_str = (
                 f"[bold cyan][{bar}] {pct:5.1f}%[/bold cyan] "
-                f"| Step [bold]{m.step}/{m.total_steps}[/bold] "
+                f"| Step [bold]{m.step}/{m.total_steps}[/bold]{resume_tag} "
                 f"| {m.step_time_sec:.2f}s/step "
                 f"| Elapsed {elapsed:.0f}s | ETA {eta:.0f}s"
             )

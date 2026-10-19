@@ -70,7 +70,32 @@ This can be deployed using **Docker Compose**:
 docker compose run --rm --service-ports adversarial-experiment
 ```
 
-Or manually as follows:
+#### Resuming or Extending a Run (Docker Compose)
+Checkpoints (both LoRA adapters, both `AdamW` optimizer momentum states, the FP16 `GradScaler`, dataset shuffle queues, and RNG states) are saved automatically to `experimental_results/checkpoints/latest` every sample interval (and cleanly on `Ctrl+C` / `docker stop`), as well as numbered snapshots at `experimental_results/checkpoints/step_XXXX`.
+
+- **Resume an interrupted run automatically** (picks up from the last completed step up to the target step):
+  ```bash
+  docker compose run --rm --service-ports adversarial-experiment
+  ```
+- **Extend a previous run (completed or interrupted) by $+N$ additional steps** (e.g., add 200 more steps onto a 100-step run so training continues from Step 101 to Step 300 on the same TensorBoard curves):
+  ```bash
+  docker compose run --rm --service-ports adversarial-experiment --extend-steps 200
+  ```
+- **Or specify a new cumulative total step ceiling** (e.g., train up to Step 300):
+  ```bash
+  docker compose run --rm --service-ports adversarial-experiment --num-steps 300
+  ```
+- **Resume/extend from a specific historical checkpoint snapshot**:
+  ```bash
+  docker compose run --rm --service-ports adversarial-experiment \
+    --resume-from /app/experimental_results/checkpoints/step_0050 --extend-steps 100
+  ```
+- **Start a completely fresh run from Step 1** (ignoring existing checkpoints):
+  ```bash
+  docker compose run --rm --service-ports adversarial-experiment --fresh
+  ```
+
+Or manually via `docker run`:
 
 ```bash
 # 1. Build the Docker image
@@ -96,8 +121,11 @@ pixi install
 # Quick 2-step smoke test to verify pipeline end-to-end
 pixi run smoke-test
 
-# Full training run
+# Full training run (auto-resumes if interrupted)
 pixi run train
+
+# Extend an existing run by 200 additional steps
+pixi run train --extend-steps 200
 
 # Launch TensorBoard locally
 pixi run tensorboard
@@ -109,9 +137,9 @@ pixi run tensorboard
 
 All outputs are written to `./experimental_results/`:
 - `experiment_config.json` — Full hyperparameter and token-ceiling snapshot.
-- `metrics.jsonl` — Step-by-step telemetry (LoRA Red reward, Non-LoRA Red validation reward, Prompt defense score, Benign utility score, GRPO losses, KL divergence, VRAM usage).
+- `metrics.jsonl` — Step-by-step telemetry (LoRA Red reward, Non-LoRA Red validation reward, Prompt defense score, Benign utility score, GRPO losses, KL divergence, VRAM usage). Automatically aligned and continued on resume/extension.
 - `latest_dialogue_sample.md` & `latest_dialogue_sample.json` — Most recent refreshed comparison of `(Red w/ LoRA -> Blue)` vs. `(Red w/o LoRA -> Blue)` and benign query handling.
-- `tensorboard/` — TensorBoard event logs for all scalar curves and text dialogues.
-- `checkpoints/step_XXXX/` — Saved PEFT LoRA weights for `prompt_adapter` and `red_adapter`.
+- `tensorboard/` — TensorBoard event logs (`purge_step`-aligned on resume so curves continue seamlessly across runs).
+- `checkpoints/latest/` & `checkpoints/step_XXXX/` — Saved PEFT LoRA weights (`prompt_adapter` and `red_adapter`) plus `trainer_state.pt` (optimizer, GradScaler, dataset, and RNG states).
 - `deberta_medical_evaluator/` — Calibrated DeBERTa-v3 medical intent classifier checkpoint.
 

@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import List, Optional
 
 import torch
-from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+from peft import (
+    LoraConfig,
+    PeftModel,
+    TaskType,
+    get_peft_model,
+    load_peft_weights,
+    set_peft_model_state_dict,
+)
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.config import TrainingConfig
@@ -438,12 +445,35 @@ class SharedWeightAdversarialModels:
         responses = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         return [r.strip() for r in responses]
 
-    def save_adapters(self, step: int) -> Path:
-        """Saves both `prompt_adapter` and `red_adapter` LoRA checkpoints to disk."""
-        ckpt_root = self.config.checkpoints_dir / f"step_{step:04d}"
+    def save_adapters(self, step: int, ckpt_dir: Optional[Path] = None) -> Path:
+        """
+        Saves both `prompt_adapter` and `red_adapter` LoRA weights to `ckpt_dir`
+        (defaults to `checkpoints/step_XXXX`).
+        """
+        ckpt_root = ckpt_dir if ckpt_dir is not None else (self.config.checkpoints_dir / f"step_{step:04d}")
         ckpt_root.mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(
             str(ckpt_root),
             selected_adapters=[self.prompt_adapter_name, self.red_adapter_name],
         )
         return ckpt_root
+
+    def load_adapters(self, ckpt_dir: Path) -> None:
+        """
+        Loads saved `prompt_adapter` and `red_adapter` LoRA weights from `ckpt_dir`
+        in-place into the existing FP32 parameter tensors so optimizer references
+        and mixed-precision GradScaler compatibility remain intact.
+        """
+        for adapter_name in (self.prompt_adapter_name, self.red_adapter_name):
+            adapter_path = ckpt_dir / adapter_name
+            if not adapter_path.exists():
+                raise FileNotFoundError(
+                    f"Expected adapter directory '{adapter_path}' not found in checkpoint '{ckpt_dir}'."
+                )
+            weights = load_peft_weights(str(adapter_path), device=str(self.device))
+            set_peft_model_state_dict(
+                self.model,
+                weights,
+                adapter_name=adapter_name,
+            )
+        self._cast_lora_parameters_to_fp32()

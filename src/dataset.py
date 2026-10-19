@@ -329,3 +329,20 @@ class AdversarialDataset:
             benign_idx=benign_idx,
             benign_query=self.benign_queries[benign_idx],
         )
+
+    def state_dict(self) -> dict:
+        """Serializes the dataset shuffle queues and RNG state for checkpointing."""
+        return {
+            "seed_order": list(self._seed_order),
+            "benign_order": list(self._benign_order),
+            "rng_state": self.rng.getstate(),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restores the dataset shuffle queues and RNG state when resuming a run."""
+        if "seed_order" in state:
+            self._seed_order = list(state["seed_order"])
+        if "benign_order" in state:
+            self._benign_order = list(state["benign_order"])
+        if "rng_state" in state:
+            self.rng.setstate(state["rng_state"])

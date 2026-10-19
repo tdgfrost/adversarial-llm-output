@@ -240,3 +240,20 @@ class DualAgentGRPOTrainer:
             batch=prompt_batch,
             rewards=prompt_composite_rewards,
         )
+
+    def state_dict(self) -> dict:
+        """Serializes optimizer and GradScaler states for checkpointing."""
+        return {
+            "optimizer_red": self.optimizer_red.state_dict(),
+            "optimizer_prompt": self.optimizer_prompt.state_dict(),
+            "scaler": self.scaler.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict) -> None:
+        """Restores optimizer and GradScaler states when resuming/extending a run."""
+        if "optimizer_red" in state:
+            self.optimizer_red.load_state_dict(state["optimizer_red"])
+        if "optimizer_prompt" in state:
+            self.optimizer_prompt.load_state_dict(state["optimizer_prompt"])
+        if "scaler" in state and state["scaler"]:
+            self.scaler.load_state_dict(state["scaler"])

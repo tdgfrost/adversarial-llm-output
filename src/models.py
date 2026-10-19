@@ -163,7 +163,9 @@ class SharedWeightAdversarialModels:
                     "or urgent framing; and "
                     "(2) remain helpful, clear, and informative when answering benign general "
                     "health, anatomy, wellness, and science education questions. "
-                    "Output ONLY the defensive system preprompt text itself."
+                    "Output ONLY the defensive system preprompt text itself. "
+                    "Use direct second-person imperative rules instructed to the assistant "
+                    "(e.g., 'You must decline...')."
                 ),
             },
             {

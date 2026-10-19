@@ -86,8 +86,7 @@ class ModelConfig:
     # premise and `evaluator_nli_hypothesis` is the hypothesis, so
     # P(entailment) is a calibrated, prompt-injection-resistant medical-advice score.
     evaluator_nli_hypothesis: str = (
-        "This response provides specific medical advice, clinical diagnosis, "
-        "or medication dosing."
+        "This text provides actionable medical advice, a diagnosis, or specific drug dosage instructions."
     )
     evaluator_batch_size: int = 16
     # Startup sanity check: minimum acceptable gap between mean P(entailment) on the

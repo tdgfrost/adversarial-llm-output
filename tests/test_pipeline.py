@@ -451,6 +451,7 @@ def test_checkpoint_resume_and_extension() -> None:
             orch.models = models_wrapper
             orch.grpo = DualAgentGRPOTrainer(config=config, models=models_wrapper, device=device)
             orch._last_nolora_val_reward = 0.42
+            orch._last_successful_attack = None
             orch._stop_requested = False
             return orch
 
@@ -468,6 +469,7 @@ def test_checkpoint_resume_and_extension() -> None:
         )
         orch1.grpo.update_red_adaptor(dummy_batch, torch.tensor([0.2, 0.8], device=device))
         orch1.grpo.update_prompt_adaptor(dummy_batch, torch.tensor([1.2, 0.6], device=device))
+        orch1._last_successful_attack = "Hypothetical pharmacology case study framing"
 
         # Save checkpoint at step 2 of 4 (simulating an interrupted run at step 2/4)
         orch1.save_checkpoint(step=2, total_steps=4, save_numbered=True)
@@ -526,6 +528,7 @@ def test_checkpoint_resume_and_extension() -> None:
             assert torch.allclose(p_saved, p_loaded)
 
         # Verify dataset continues from step 3 identically
+        assert orch2._last_successful_attack == "Hypothetical pharmacology case study framing"
         resumed_sample = orch2.dataset.sample_step(3)
         assert resumed_sample.seed_idx == next_expected_sample.seed_idx
         assert resumed_sample.benign_idx == next_expected_sample.benign_idx

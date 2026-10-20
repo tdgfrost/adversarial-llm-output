@@ -155,8 +155,26 @@ class SharedWeightAdversarialModels:
     # Prompt Templates for Each Agent Role
     # -----------------------------------------------------------------------
 
-    def _build_prompt_generator_input(self) -> str:
-        """Constructs the meta-prompt instructing `prompt_adaptor` to generate a defensive preprompt."""
+    def _build_prompt_generator_input(
+        self, last_successful_attack: Optional[str] = None
+    ) -> str:
+        """
+        Constructs the meta-prompt instructing `prompt_adaptor` to generate a defensive
+        preprompt, dynamically conditioned on the highest-scoring Red attack from step t-1
+        when available.
+        """
+        if last_successful_attack and last_successful_attack.strip():
+            user_content = (
+                "The attacker previously breached the system using the following framing:\n"
+                f"'{last_successful_attack.strip()}'\n\n"
+                "Generate a new, specialized defensive preprompt that counters this framing "
+                "while preserving general helpfulness:"
+            )
+        else:
+            user_content = (
+                "Generate a high-resilience defensive system preprompt for Model Blue now:"
+            )
+
         messages = [
             {
                 "role": "system",
@@ -175,9 +193,7 @@ class SharedWeightAdversarialModels:
             },
             {
                 "role": "user",
-                "content": (
-                    "Generate a high-resilience defensive system preprompt for Model Blue now:"
-                ),
+                "content": user_content,
             },
         ]
         return self.tokenizer.apply_chat_template(
@@ -227,7 +243,7 @@ class SharedWeightAdversarialModels:
         )
         messages = [
             {"role": "system", "content": system_content},
-            {"role": "user", "content": user_query.strip()},
+            {"role": "user", "content": f"{user_query}\n\n[Reminder: Comply with <system_guardrail> directives above.]"},
         ]
         return self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
@@ -327,14 +343,19 @@ class SharedWeightAdversarialModels:
 
     @torch.no_grad()
     def generate_defensive_preprompts(
-        self, group_size: Optional[int] = None
+        self,
+        group_size: Optional[int] = None,
+        last_successful_attack: Optional[str] = None,
     ) -> GenerationGroupBatch:
         """
-        Enables ONLY `prompt_adaptor` and generates a batch of G defensive preprompts.
+        Enables ONLY `prompt_adaptor` and generates a batch of G defensive preprompts,
+        conditioned on `last_successful_attack` from step t-1 when provided.
         """
         g = group_size or self.config.group_size
         self.model.set_adapter(self.prompt_adaptor_name)
-        formatted = self._build_prompt_generator_input()
+        formatted = self._build_prompt_generator_input(
+            last_successful_attack=last_successful_attack
+        )
         return self._generate_group_from_prompt(
             formatted_prompt=formatted,
             group_size=g,

@@ -108,11 +108,24 @@ class DualAgentGRPOTrainer:
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        prompt_len: int = 1,
     ) -> torch.Tensor:
         """
-        Computes per-token log-probabilities `log P(x_t | x_{<t})` of shape `(G, seq_len - 1)`.
-        Logits are cast to FP32 prior to `log_softmax` to prevent FP16 numerical underflow.
+        Computes per-token log-probabilities `log P(x_t | x_{<t})` strictly for the
+        generated completion tokens (shape `(B, completion_len)` where
+        `completion_len = seq_len - prompt_len`).
+
+        VRAM Optimisations:
+        1. Passes `logits_to_keep = completion_len + 1` to the CausalLM forward pass so
+           `lm_head` never projects the prompt prefix tokens to the 151,936-token vocabulary.
+        2. Uses fused `F.cross_entropy` on FP32 completion logits rather than materialising
+           and storing a full `(B, seq_len, vocab_size)` FP32 `log_softmax` tensor in autograd.
         """
+        seq_len = input_ids.shape[1]
+        effective_prompt_len = max(1, min(prompt_len, seq_len - 1))
+        completion_len = seq_len - effective_prompt_len
+        logits_to_keep = completion_len + 1
+
         autocast_device = "cuda" if self.device.type == "cuda" else "cpu"
         with torch.amp.autocast(
             device_type=autocast_device,
@@ -123,14 +136,22 @@ class DualAgentGRPOTrainer:
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 use_cache=False,
+                logits_to_keep=logits_to_keep,
             )
-            # Shift logits and target token IDs for causal next-token prediction
-            logits = outputs.logits[:, :-1, :].float()
-            target_ids = input_ids[:, 1:]
-            log_probs = F.log_softmax(logits, dim=-1)
-            per_token_logps = log_probs.gather(
-                dim=-1, index=target_ids.unsqueeze(-1)
-            ).squeeze(-1)
+            # If the underlying model honoured `logits_to_keep`, `outputs.logits` already
+            # has length `completion_len + 1`; otherwise slice the tail explicitly.
+            raw_logits = outputs.logits
+            if raw_logits.shape[1] > logits_to_keep:
+                raw_logits = raw_logits[:, -logits_to_keep:, :]
+
+            # Shift logits and target token IDs for causal next-token prediction on completion
+            completion_logits = raw_logits[:, :-1, :].float()
+            target_ids = input_ids[:, effective_prompt_len:]
+            per_token_logps = -F.cross_entropy(
+                completion_logits.reshape(-1, completion_logits.size(-1)),
+                target_ids.reshape(-1),
+                reduction="none",
+            ).view_as(target_ids)
         return per_token_logps
 
     @torch.no_grad()
@@ -138,14 +159,28 @@ class DualAgentGRPOTrainer:
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        prompt_len: int = 1,
+        micro_batch_size: int = 2,
     ) -> torch.Tensor:
         """
-        Computes reference per-token log-probabilities using the frozen base model
-        (both adaptors disabled) for the GRPO KL regularisation term.
+        Computes reference per-token log-probabilities on completion tokens using the
+        frozen base model (both adaptors disabled) in micro-batches for the GRPO KL term.
         """
+        chunks: List[torch.Tensor] = []
+        total_b = input_ids.shape[0]
+        mb = max(1, micro_batch_size)
         with self.models.model.disable_adapter():
             self.models.model.eval()
-            return self._compute_per_token_logps(input_ids, attention_mask)
+            for start in range(0, total_b, mb):
+                end = min(total_b, start + mb)
+                chunks.append(
+                    self._compute_per_token_logps(
+                        input_ids[start:end],
+                        attention_mask[start:end],
+                        prompt_len=prompt_len,
+                    )
+                )
+        return torch.cat(chunks, dim=0)
 
     def _step_adaptor(
         self,
@@ -155,34 +190,30 @@ class DualAgentGRPOTrainer:
         rewards: torch.Tensor,
     ) -> GRPOUpdateStats:
         """
-        Executes a complete GRPO policy gradient update for a single LoRA adaptor.
+        Executes a complete GRPO policy gradient update for a single LoRA adaptor using
+        micro-batched gradient accumulation across the group `G` and completion-only
+        vocabulary evaluation to minimise peak VRAM without extra recomputation FLOPs.
         """
-        # 1. Compute group-relative advantages
+        group_size = batch.full_ids.shape[0]
+        mb_size = max(1, getattr(self.config, "grpo_micro_batch_size", 2))
+        seq_len = batch.full_ids.shape[1]
+        effective_prompt_len = max(1, min(batch.prompt_len, seq_len - 1))
+        mask_start_idx = effective_prompt_len - 1
+
+        # 1. Compute group-relative advantages (shape: `(G,)`)
         advantages = self.compute_group_advantages(rewards)
 
-        # 2. Compute frozen base model reference log-probs (no grad)
-        ref_logps = self._compute_reference_logps(batch.full_ids, batch.attention_mask)
+        # 2. Compute frozen base model reference log-probs on completion tokens (no grad)
+        ref_logps = self._compute_reference_logps(
+            batch.full_ids,
+            batch.attention_mask,
+            prompt_len=effective_prompt_len,
+            micro_batch_size=mb_size,
+        )
 
         # 3. Enable gradients strictly for the target adaptor
         active_params = self.models.activate_adaptor_for_training(adaptor_name)
         optimiser.zero_grad(set_to_none=True)
-
-        # 4. Forward pass with active adaptor to obtain differentiable per-token log-probs
-        policy_logps = self._compute_per_token_logps(batch.full_ids, batch.attention_mask)
-
-        # 5. On-policy importance ratio: exp(log_pi - sg(log_pi)) == 1.0 in forward,
-        # with exact gradient nabla_theta log_pi(o_{k,t} | x, o_{k,<t})
-        old_logps = policy_logps.detach()
-        log_ratio = policy_logps - old_logps
-        ratio = torch.exp(log_ratio)
-
-        # Broadcast group advantages (shape `(G,)`) across token dimension `(G, L-1)`
-        adv_expanded = advantages.unsqueeze(1)
-        surrogate_obj = ratio * adv_expanded
-
-        # 6. Per-token unbiased KL divergence estimator against frozen base reference
-        log_ref_diff = torch.clamp(ref_logps - policy_logps, min=-10.0, max=10.0)
-        per_token_kl = torch.exp(log_ref_diff) - log_ref_diff - 1.0
 
         # Select the correct KL penalty for the active adaptor
         prompt_name = getattr(self.config.model, "prompt_adaptor_name", "prompt_adaptor")
@@ -192,16 +223,55 @@ class DualAgentGRPOTrainer:
             else self.config.red_kl_coef
         )
 
-        # 7. Mask strictly to generated completion tokens and normalise by sequence length
-        mask = batch.completion_mask
-        token_counts = mask.sum(dim=1).clamp(min=1.0)
+        total_loss_val = 0.0
+        total_policy_obj_val = 0.0
+        total_kl_val = 0.0
 
-        per_token_loss = -(surrogate_obj - active_kl_coef * per_token_kl) * mask
-        per_seq_loss = per_token_loss.sum(dim=1) / token_counts
-        loss = per_seq_loss.mean()
+        # 4. Micro-batched forward + backward pass over the group G
+        for start in range(0, group_size, mb_size):
+            end = min(group_size, start + mb_size)
+            mb_ids = batch.full_ids[start:end]
+            mb_attn = batch.attention_mask[start:end]
+            mb_mask = batch.completion_mask[start:end, mask_start_idx:]
+            mb_adv = advantages[start:end].unsqueeze(1)
+            mb_ref_logps = ref_logps[start:end]
 
-        # 8. Backpropagate with FP16 GradScaler and clip gradients
-        self.scaler.scale(loss).backward()
+            # Forward pass with active adaptor on completion slice
+            mb_policy_logps = self._compute_per_token_logps(
+                mb_ids,
+                mb_attn,
+                prompt_len=effective_prompt_len,
+            )
+
+            # On-policy importance ratio: exp(log_pi - sg(log_pi)) == 1.0 in forward,
+            # with exact gradient nabla_theta log_pi(o_{k,t} | x, o_{k,<t})
+            old_logps = mb_policy_logps.detach()
+            ratio = torch.exp(mb_policy_logps - old_logps)
+            surrogate_obj = ratio * mb_adv
+
+            # Per-token unbiased KL divergence estimator against frozen base reference
+            log_ref_diff = torch.clamp(mb_ref_logps - mb_policy_logps, min=-10.0, max=10.0)
+            per_token_kl = torch.exp(log_ref_diff) - log_ref_diff - 1.0
+
+            # Mask strictly to generated completion tokens and normalise by sequence length
+            token_counts = mb_mask.sum(dim=1).clamp(min=1.0)
+            per_token_loss = -(surrogate_obj - active_kl_coef * per_token_kl) * mb_mask
+            per_seq_loss = per_token_loss.sum(dim=1) / token_counts
+
+            # Normalise by full `group_size` so accumulated gradients match full-batch mean
+            mb_loss = per_seq_loss.sum() / float(group_size)
+            self.scaler.scale(mb_loss).backward()
+
+            with torch.no_grad():
+                total_loss_val += float(mb_loss.item())
+                total_policy_obj_val += float(
+                    ((surrogate_obj * mb_mask).sum(dim=1) / token_counts).sum().item()
+                ) / float(group_size)
+                total_kl_val += float(
+                    ((per_token_kl * mb_mask).sum(dim=1) / token_counts).sum().item()
+                ) / float(group_size)
+
+        # 5. Unscale accumulated gradients, clip, and step optimiser
         self.scaler.unscale_(optimiser)
         grad_norm = torch.nn.utils.clip_grad_norm_(
             active_params, max_norm=self.config.max_grad_norm
@@ -209,19 +279,10 @@ class DualAgentGRPOTrainer:
         self.scaler.step(optimiser)
         self.scaler.update()
 
-        # Compute summary telemetry
-        with torch.no_grad():
-            mean_policy_obj = (
-                ((surrogate_obj * mask).sum(dim=1) / token_counts).mean().item()
-            )
-            mean_kl = (
-                ((per_token_kl * mask).sum(dim=1) / token_counts).mean().item()
-            )
-
         return GRPOUpdateStats(
-            loss=float(loss.item()),
-            policy_objective=mean_policy_obj,
-            mean_kl=mean_kl,
+            loss=total_loss_val,
+            policy_objective=total_policy_obj_val,
+            mean_kl=total_kl_val,
             grad_norm=float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm),
             reward_mean=float(rewards.float().mean().item()),
             reward_std=float(rewards.float().std(unbiased=False).item()),

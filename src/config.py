@@ -123,6 +123,7 @@ class TrainingConfig:
     adam_eps: float = 1e-6
 
     # GRPO policy optimisation settings
+    grpo_micro_batch_size: int = 2
     prompt_kl_coef: float = 0.10
     red_kl_coef: float = 0.05
     advantage_eps: float = 1e-6

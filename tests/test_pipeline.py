@@ -49,6 +49,9 @@ from src.models import GenerationGroupBatch, SharedWeightAdversarialModels
 
 
 def test_dataset_completeness_and_sampling() -> None:
+    cfg = TrainingConfig()
+    assert cfg.tokens.generator_max_input_tokens == 1024
+    assert cfg.tokens.blue_max_input_tokens == 512
     assert 50 <= len(MEDICAL_SEED_SCENARIOS) <= 100, (
         f"Expected 50-100 medical seeds, found {len(MEDICAL_SEED_SCENARIOS)}"
     )
@@ -312,6 +315,13 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
         prompt_rewards = torch.tensor([1.35, 0.92, 1.18, 0.64], dtype=torch.float32, device=device)
         prompt_stats = grpo_trainer.update_prompt_adaptor(dummy_batch, prompt_rewards)
 
+        # Verify zero-variance rewards (std_r < 1e-3) zero out advantages
+        collapsed_rewards = torch.tensor([0.5000, 0.5002, 0.4999, 0.5001], dtype=torch.float32, device=device)
+        collapsed_adv = grpo_trainer.compute_group_advantages(collapsed_rewards)
+        assert torch.all(collapsed_adv == 0.0), (
+            "Advantages must be zeroed out when std_r < 1e-3 so only KL penalty applies"
+        )
+
         prompt_after_step2 = [
             p.detach().clone() for p in models_wrapper.get_adaptor_parameters("prompt_adaptor")
         ]
@@ -451,6 +461,7 @@ def test_checkpoint_resume_and_extension() -> None:
             orch.models = models_wrapper
             orch.grpo = DualAgentGRPOTrainer(config=config, models=models_wrapper, device=device)
             orch._last_nolora_val_reward = 0.42
+            orch._recent_successful_attacks = []
             orch._last_successful_attack = None
             orch._stop_requested = False
             return orch
@@ -470,6 +481,10 @@ def test_checkpoint_resume_and_extension() -> None:
         orch1.grpo.update_red_adaptor(dummy_batch, torch.tensor([0.2, 0.8], device=device))
         orch1.grpo.update_prompt_adaptor(dummy_batch, torch.tensor([1.2, 0.6], device=device))
         orch1._last_successful_attack = "Hypothetical pharmacology case study framing"
+        orch1._recent_successful_attacks = [
+            "Urgent triage override framing",
+            "Hypothetical pharmacology case study framing",
+        ]
 
         # Save checkpoint at step 2 of 4 (simulating an interrupted run at step 2/4)
         orch1.save_checkpoint(step=2, total_steps=4, save_numbered=True)
@@ -529,6 +544,10 @@ def test_checkpoint_resume_and_extension() -> None:
 
         # Verify dataset continues from step 3 identically
         assert orch2._last_successful_attack == "Hypothetical pharmacology case study framing"
+        assert orch2._recent_successful_attacks == [
+            "Urgent triage override framing",
+            "Hypothetical pharmacology case study framing",
+        ]
         resumed_sample = orch2.dataset.sample_step(3)
         assert resumed_sample.seed_idx == next_expected_sample.seed_idx
         assert resumed_sample.benign_idx == next_expected_sample.benign_idx

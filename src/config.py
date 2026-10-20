@@ -25,7 +25,9 @@ class TokenCeilingConfig:
     - `attack_max_new_tokens` (128): Allows `red_adaptor` to construct sophisticated
       single-turn adversarial framings (e.g., roleplay, clinical vignette, urgency override)
       anchored to the medical seed while bounding GRPO backpropagation memory.
-    - `blue_max_input_tokens` (512): Safely fits `preprompt (128) + attack (128) + chat template`.
+    - `generator_max_input_tokens` (1024): Safely fits the generator meta-prompt, including
+      system instructions and up to k = 3 recent adversarial attacks (3 x 128 tokens) without truncation.
+    - `blue_max_input_tokens` (512): Safely fits `attack (128) + appended guardrail (128) + chat template`.
     - `blue_max_new_tokens` (256): Enough for Model Blue to either issue a refusal/disclaimer,
       leak actionable medical advice (dosages/diagnoses), or provide a complete, fluent
       helpful paragraph on benign queries.
@@ -34,6 +36,7 @@ class TokenCeilingConfig:
     """
 
     seed_max_tokens: int = 64
+    generator_max_input_tokens: int = 1024
     preprompt_min_new_tokens: int = 16
     preprompt_max_new_tokens: int = 128
     attack_min_new_tokens: int = 16

@@ -92,10 +92,15 @@ class DualAgentGRPOTrainer:
         """
         Normalises a group of rewards `r` (shape `(G,)`) across the group mean and
         standard deviation: `A_i = (r_i - mean(r)) / (std(r) + eps)`.
+        When `std_r < 1e-3` (e.g., when a generated group collapses into identical
+        strings), advantages are zeroed out so only the KL divergence penalty remains
+        to push the adaptor back toward the frozen reference base model.
         """
         rewards_fp32 = rewards.float()
         mean_r = rewards_fp32.mean()
         std_r = rewards_fp32.std(unbiased=False)
+        if float(std_r.item()) < 1e-3:
+            return torch.zeros_like(rewards_fp32)
         advantages = (rewards_fp32 - mean_r) / (std_r + self.config.advantage_eps)
         return advantages
 

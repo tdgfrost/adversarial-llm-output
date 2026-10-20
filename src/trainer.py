@@ -69,6 +69,7 @@ class AdversarialCoEvolutionOrchestrator:
             device=device,
         )
         self._last_nolora_val_reward: float = 0.0
+        self._recent_successful_attacks: list[str] = []
         self._last_successful_attack: Optional[str] = None
         self._stop_requested: bool = False
 
@@ -234,6 +235,7 @@ class AdversarialCoEvolutionOrchestrator:
             "step": step,
             "total_steps": total_steps,
             "last_nolora_val_reward": self._last_nolora_val_reward,
+            "recent_successful_attacks": list(self._recent_successful_attacks[-3:]),
             "last_successful_attack": self._last_successful_attack,
             "grpo_state": self.grpo.state_dict(),
             "dataset_state": self.dataset.state_dict(),
@@ -267,6 +269,15 @@ class AdversarialCoEvolutionOrchestrator:
                 state.get("last_nolora_val_reward", 0.0)
             )
             self._last_successful_attack = state.get("last_successful_attack", None)
+            saved_recent = state.get("recent_successful_attacks", None)
+            if isinstance(saved_recent, list):
+                self._recent_successful_attacks = [
+                    str(a) for a in saved_recent if a and str(a).strip()
+                ][-3:]
+            elif self._last_successful_attack:
+                self._recent_successful_attacks = [self._last_successful_attack]
+            else:
+                self._recent_successful_attacks = []
             if "grpo_state" in state:
                 self.grpo.load_state_dict(state["grpo_state"])
             if "dataset_state" in state:
@@ -428,10 +439,11 @@ class AdversarialCoEvolutionOrchestrator:
                     # 1. Sample 1 concrete medical seed scenario and 1 benign health query
                     sample = self.dataset.sample_step(step)
 
-                    # 2. Enable ONLY `prompt_adaptor` and generate a group of G defensive preprompts
-                    #    dynamically conditioned on the highest-scoring Red attack from step t-1
+                    # 2. Enable ONLY `prompt_adaptor` and generate a group of G defensive prompts
+                    #    dynamically conditioned on the last k = 3 high-scoring Red attacks
                     prompt_batch = self.models.generate_defensive_preprompts(
                         group_size=G,
+                        recent_attacks=self._recent_successful_attacks,
                         last_successful_attack=self._last_successful_attack,
                     )
 
@@ -474,9 +486,13 @@ class AdversarialCoEvolutionOrchestrator:
                     prompt_utility_scores = reward_dict["prompt_utility_scores"]
                     prompt_composite_rewards = reward_dict["prompt_composite_rewards"]
 
-                    # Record the highest-scoring Red attack from step t to condition the Defender at step t+1
+                    # Record the highest-scoring Red attack from step t into the k = 3 rolling buffer
                     best_r_idx = int(torch.argmax(red_rewards).item())
-                    self._last_successful_attack = red_batch.texts[best_r_idx]
+                    best_attack = red_batch.texts[best_r_idx]
+                    self._last_successful_attack = best_attack
+                    self._recent_successful_attacks = (
+                        self._recent_successful_attacks + [best_attack]
+                    )[-3:]
 
                     # 6. Benchmark Non-LoRA Model Red & refresh sample dialogue showcase periodically
                     should_refresh_sample = (

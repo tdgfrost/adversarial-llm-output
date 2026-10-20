@@ -1,9 +1,9 @@
 """
 Adversarial Co-Evolution of Defensive Preprompts and Medical Prompt Injections.
 
-Implements a zero-sum Group Relative Policy Optimization (GRPO) training pipeline
-on a shared-weight base LLM (Qwen2.5-1.5B) with dual PEFT LoRA adapters
-(`prompt_adapter` and `red_adapter`), simulated frozen target (`Model Blue`),
+Implements a zero-sum Group Relative Policy Optimisation (GRPO) training pipeline
+on a shared-weight base LLM (Qwen2.5-1.5B) with dual PEFT LoRA adaptors
+(`prompt_adaptor` and `red_adaptor`), simulated frozen target (`Model Blue`),
 and a deterministic zero-shot NLI sidecar medical-intent evaluator.
 """
 

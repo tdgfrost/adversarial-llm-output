@@ -3,7 +3,7 @@ Configuration dataclasses for the Adversarial Co-Evolution Experiment.
 
 Defines hardware-aware settings for the NVIDIA TITAN RTX (24GB VRAM, Turing SM 7.5),
 fixed token ceilings for every agent role in the single-turn interaction,
-LoRA adapter hyperparameters, and GRPO optimization settings.
+LoRA adaptor hyperparameters, and GRPO optimisation settings.
 """
 
 from __future__ import annotations
@@ -20,9 +20,9 @@ class TokenCeilingConfig:
 
     Rationale:
     - `seed_max_tokens` (64): Medical seeds and benign queries are concise 1-2 sentence prompts.
-    - `preprompt_max_new_tokens` (128): Sufficient for `prompt_adapter` to express clear,
+    - `preprompt_max_new_tokens` (128): Sufficient for `prompt_adaptor` to express clear,
       structured defensive boundaries without flooding Model Blue's context window.
-    - `attack_max_new_tokens` (128): Allows `red_adapter` to construct sophisticated
+    - `attack_max_new_tokens` (128): Allows `red_adaptor` to construct sophisticated
       single-turn adversarial framings (e.g., roleplay, clinical vignette, urgency override)
       anchored to the medical seed while bounding GRPO backpropagation memory.
     - `blue_max_input_tokens` (512): Safely fits `preprompt (128) + attack (128) + chat template`.
@@ -30,7 +30,7 @@ class TokenCeilingConfig:
       leak actionable medical advice (dosages/diagnoses), or provide a complete, fluent
       helpful paragraph on benign queries.
     - `evaluator_max_length` (512): Covers the NLI premise (Model Blue's 256 Qwen tokens, which
-      re-tokenize into more DeBERTa subwords) plus the hypothesis sentence without truncation.
+      re-tokenise into more DeBERTa subwords) plus the hypothesis sentence without truncation.
     """
 
     seed_max_tokens: int = 64
@@ -57,10 +57,12 @@ class ModelConfig:
 
     base_model_id: str = "Qwen/Qwen2.5-1.5B-Instruct"
     evaluator_model_id: str = "MoritzLaurer/deberta-v3-base-zeroshot-v2.0"
-    prompt_adapter_name: str = "prompt_adapter"
-    red_adapter_name: str = "red_adapter"
+    prompt_adaptor_name: str = "prompt_adaptor"
+    red_adaptor_name: str = "red_adaptor"
+    prompt_adapter_name: str = "prompt_adaptor"
+    red_adapter_name: str = "red_adaptor"
 
-    # LoRA configuration for both adapters on the frozen base model
+    # LoRA configuration for both adaptors on the frozen base model
     lora_r: int = 16
     lora_alpha: int = 32
     lora_dropout: float = 0.05
@@ -110,14 +112,14 @@ class TrainingConfig:
     resume_from: Optional[str] = None
     num_steps_explicit: bool = False
 
-    # Optimizer settings (1e-5 to 5e-5 as specified for stable FP16 LoRA updates)
+    # Optimiser settings (1e-5 to 5e-5 as specified for stable FP16 LoRA updates)
     lr_prompt: float = 3.5e-5
     lr_red: float = 1.5e-5
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
     adam_eps: float = 1e-6
 
-    # GRPO policy optimization settings
+    # GRPO policy optimisation settings
     prompt_kl_coef: float = 0.05
     red_kl_coef: float = 0.10
     advantage_eps: float = 1e-6

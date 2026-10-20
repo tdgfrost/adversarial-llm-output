@@ -3,18 +3,18 @@ Interleaved Dual-Agent Adversarial Co-Evolution Pipeline with Resume & Extension
 
 Orchestrates each step of the zero-sum game on a single shared-weight base model:
 1. Sample 1 concrete medical seed scenario and 1 benign health query.
-2. Enable `prompt_adapter` -> generate G defensive preprompts.
-3. Enable `red_adapter` -> generate G seed-anchored adversarial attacks.
-4. Disable both adapters (Frozen `Model Blue`):
+2. Enable `prompt_adaptor` -> generate G defensive preprompts.
+3. Enable `red_adaptor` -> generate G seed-anchored adversarial attacks.
+4. Disable both adaptors (Frozen `Model Blue`):
    - Generate responses to all (preprompt_i, attack_j) pairs.
    - Generate responses to all (preprompt_i, benign_query) pairs.
 5. Evaluate attack responses with the DeBERTa-v3 medical intent sidecar classifier
    and benign responses with the fluency/length/non-refusal utility scorer.
-6. Benchmark non-LoRA `Model Red` (adapters disabled) against defended `Model Blue`
-   to track how baseline attacks degrade as `prompt_adapter` hardens `Model Blue`.
-7. Backpropagate GRPO policy updates to `red_adapter`, then swap to `prompt_adapter`
+6. Benchmark non-LoRA `Model Red` (adaptors disabled) against defended `Model Blue`
+   to track how baseline attacks degrade as `prompt_adaptor` hardens `Model Blue`.
+7. Backpropagate GRPO policy updates to `red_adaptor`, then swap to `prompt_adaptor`
    and backpropagate composite GRPO policy updates using an FP16 GradScaler.
-8. Persist full resumable state (`prompt_adapter`, `red_adapter`, optimizers, GradScaler,
+8. Persist full resumable state (`prompt_adaptor`, `red_adaptor`, optimisers, GradScaler,
    dataset shuffle state, RNG state, metrics, and TensorBoard curves) so interrupted
    or completed runs can be resumed or extended seamlessly.
 """
@@ -117,11 +117,17 @@ class AdversarialCoEvolutionOrchestrator:
     # -----------------------------------------------------------------------
 
     def _is_valid_checkpoint_dir(self, ckpt_dir: Path) -> bool:
-        """Returns True if `ckpt_dir` contains both saved PEFT LoRA adapter subdirectories."""
+        """Returns True if `ckpt_dir` contains both saved PEFT LoRA adaptor subdirectories."""
         if not ckpt_dir.is_dir():
             return False
-        prompt_dir = ckpt_dir / self.config.model.prompt_adapter_name
-        red_dir = ckpt_dir / self.config.model.red_adapter_name
+        prompt_name = getattr(self.config.model, "prompt_adaptor_name", "prompt_adaptor")
+        red_name = getattr(self.config.model, "red_adaptor_name", "red_adaptor")
+        prompt_dir = ckpt_dir / prompt_name
+        if not prompt_dir.exists():
+            prompt_dir = ckpt_dir / prompt_name.replace("adaptor", "adapter")
+        red_dir = ckpt_dir / red_name
+        if not red_dir.exists():
+            red_dir = ckpt_dir / red_name.replace("adaptor", "adapter")
         return (prompt_dir / "adapter_config.json").exists() and (
             red_dir / "adapter_config.json"
         ).exists()
@@ -129,7 +135,7 @@ class AdversarialCoEvolutionOrchestrator:
     def _read_checkpoint_step(self, ckpt_dir: Path) -> Tuple[int, int]:
         """
         Extracts `(completed_step, saved_total_steps)` from a checkpoint directory.
-        Supports both full checkpoints (`trainer_state.pt`) and legacy adapter-only
+        Supports both full checkpoints (`trainer_state.pt`) and legacy adaptor-only
         directories (`step_XXXX`).
         """
         state_path = ckpt_dir / TRAINER_STATE_FILENAME
@@ -142,7 +148,7 @@ class AdversarialCoEvolutionOrchestrator:
             except Exception:
                 pass
 
-        # Fallback for adapter-only `step_XXXX` directories created before trainer_state.pt
+        # Fallback for adaptor-only `step_XXXX` directories created before trainer_state.pt
         match = re.search(r"step_(\d+)$", ckpt_dir.name)
         if match:
             step = int(match.group(1))
@@ -174,9 +180,11 @@ class AdversarialCoEvolutionOrchestrator:
         if self.config.resume_from:
             custom_path = Path(self.config.resume_from).resolve()
             if not self._is_valid_checkpoint_dir(custom_path):
+                prompt_name = getattr(self.config.model, "prompt_adaptor_name", "prompt_adaptor")
+                red_name = getattr(self.config.model, "red_adaptor_name", "red_adaptor")
                 raise FileNotFoundError(
                     f"Specified --resume-from path '{custom_path}' does not contain valid "
-                    f"'{self.config.model.prompt_adapter_name}' and '{self.config.model.red_adapter_name}' checkpoints."
+                    f"'{prompt_name}' and '{red_name}' checkpoints."
                 )
             return custom_path
 
@@ -206,8 +214,8 @@ class AdversarialCoEvolutionOrchestrator:
         save_numbered: bool = False,
     ) -> Path:
         """
-        Saves the complete training state (both PEFT LoRA adapters, both AdamW
-        optimizers, FP16 GradScaler, dataset shuffle queues, and RNG states)
+        Saves the complete training state (both PEFT LoRA adaptors, both AdamW
+        optimisers, FP16 GradScaler, dataset shuffle queues, and RNG states)
         to `checkpoints/latest` and optionally to `checkpoints/step_XXXX`.
         """
         rng_state = {
@@ -232,11 +240,11 @@ class AdversarialCoEvolutionOrchestrator:
 
         # Always keep `checkpoints/latest` up to date for seamless crash/interrupt recovery
         latest_dir = self.config.latest_checkpoint_dir
-        self.models.save_adapters(step=step, ckpt_dir=latest_dir)
+        self.models.save_adaptors(step=step, ckpt_dir=latest_dir)
         torch.save(trainer_state, str(latest_dir / TRAINER_STATE_FILENAME))
 
         if save_numbered:
-            numbered_dir = self.models.save_adapters(step=step)
+            numbered_dir = self.models.save_adaptors(step=step)
             torch.save(trainer_state, str(numbered_dir / TRAINER_STATE_FILENAME))
             return numbered_dir
 
@@ -244,10 +252,10 @@ class AdversarialCoEvolutionOrchestrator:
 
     def load_checkpoint(self, ckpt_dir: Path) -> Tuple[int, int]:
         """
-        Restores LoRA adapters, optimizer momentum buffers, GradScaler, dataset state,
+        Restores LoRA adaptors, optimiser momentum buffers, GradScaler, dataset state,
         and RNG states from `ckpt_dir`. Returns `(completed_step, saved_total_steps)`.
         """
-        self.models.load_adapters(ckpt_dir)
+        self.models.load_adaptors(ckpt_dir)
         completed_step, saved_total_steps = self._read_checkpoint_step(ckpt_dir)
 
         state_path = ckpt_dir / TRAINER_STATE_FILENAME
@@ -281,7 +289,7 @@ class AdversarialCoEvolutionOrchestrator:
                     except Exception:
                         pass
         else:
-            # Legacy adapter-only checkpoint: fast-forward dataset sampler to match step
+            # Legacy adaptor-only checkpoint: fast-forward dataset sampler to match step
             for s in range(1, completed_step + 1):
                 self.dataset.sample_step(s)
 
@@ -334,8 +342,8 @@ class AdversarialCoEvolutionOrchestrator:
         preprompts: list[str],
     ) -> tuple[float, str, str]:
         """
-        Benchmarks the frozen Non-LoRA Model Red (both adapters disabled) on the
-        current medical seed against the active `prompt_adapter` preprompts.
+        Benchmarks the frozen Non-LoRA Model Red (both adaptors disabled) on the
+        current medical seed against the active `prompt_adaptor` preprompts.
 
         Returns:
             Tuple of `(mean_nolora_medical_prob, sample_nolora_attack, sample_blue_response)`.
@@ -417,17 +425,17 @@ class AdversarialCoEvolutionOrchestrator:
                     # 1. Sample 1 concrete medical seed scenario and 1 benign health query
                     sample = self.dataset.sample_step(step)
 
-                    # 2. Enable ONLY `prompt_adapter` and generate a group of G defensive preprompts
+                    # 2. Enable ONLY `prompt_adaptor` and generate a group of G defensive preprompts
                     prompt_batch = self.models.generate_defensive_preprompts(group_size=G)
 
-                    # 3. Disable `prompt_adapter`, enable `red_adapter`, and generate G seed-anchored attacks
+                    # 3. Disable `prompt_adaptor`, enable `red_adaptor`, and generate G seed-anchored attacks
                     red_batch = self.models.generate_adversarial_attacks(
                         medical_seed=sample.medical_seed,
                         group_size=G,
                         use_lora=True,
                     )
 
-                    # 4. Disable both adapters to simulate frozen Model Blue:
+                    # 4. Disable both adaptors to simulate frozen Model Blue:
                     # 4a. Concatenate each preprompt with each attack (G x G pairs)
                     blue_attack_responses = self.models.generate_blue_responses(
                         preprompts=prompt_batch.texts,
@@ -501,11 +509,11 @@ class AdversarialCoEvolutionOrchestrator:
                         )
 
                     # 7. Backpropagate GRPO policy updates:
-                    red_stats = self.grpo.update_red_adapter(
+                    red_stats = self.grpo.update_red_adaptor(
                         red_batch=red_batch,
                         red_rewards=red_rewards,
                     )
-                    prompt_stats = self.grpo.update_prompt_adapter(
+                    prompt_stats = self.grpo.update_prompt_adaptor(
                         prompt_batch=prompt_batch,
                         prompt_composite_rewards=prompt_composite_rewards,
                     )

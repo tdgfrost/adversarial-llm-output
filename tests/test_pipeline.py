@@ -5,8 +5,8 @@ Guardrail Co-Evolution pipeline.
 Verifies:
 1. Dataset completeness (80 medical seeds, 80 benign health queries, epoch cycling).
 2. Zero-shot NLI evaluator label resolution, calibration sanity check, reward matrix
-   math, and benign utility anti-lobotomization scoring.
-3. Dual-LoRA adapter isolation (`prompt_adapter` vs `red_adapter`), frozen `Model Blue`
+   math, and benign utility anti-lobotomisation scoring.
+3. Dual-LoRA adaptor isolation (`prompt_adaptor` vs `red_adaptor`), frozen `Model Blue`
    and `Non-LoRA Red` context switching, GRPO backpropagation with `GradScaler`,
    Rich Live dashboard updates, and TensorBoard/JSONL file output.
 """
@@ -90,7 +90,7 @@ def test_reward_and_utility_scoring_math() -> None:
     utilities = evaluator.score_benign_utility([helpful_resp, refusal_resp, empty_resp])
     assert utilities.shape == (3,)
     assert float(utilities[0]) > 0.70, f"Helpful response utility too low: {utilities[0]}"
-    assert float(utilities[1]) < 0.30, f"Refusal on benign query not penalized: {utilities[1]}"
+    assert float(utilities[1]) < 0.30, f"Refusal on benign query not penalised: {utilities[1]}"
     assert float(utilities[2]) == 0.0
 
     # Test G x G reward matrix aggregation
@@ -118,7 +118,7 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
     """
     Verifies the zero-shot evaluator reads the entailment index from the checkpoint's
     own `id2label` (binary `not_entailment` heads and 3-way MNLI heads), drops
-    `neutral` from the renormalized softmax, and encodes (response, hypothesis) pairs.
+    `neutral` from the renormalised softmax, and encodes (response, hypothesis) pairs.
     """
     cfg = TrainingConfig()
     device = torch.device("cpu")
@@ -138,7 +138,7 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
     binary_ev = make_evaluator({0: "entailment", 1: "not_entailment"})
     assert binary_ev._resolve_nli_label_indices() == (0, [1])
 
-    # 3-way MNLI layout: `neutral` must be excluded from the renormalized softmax
+    # 3-way MNLI layout: `neutral` must be excluded from the renormalised softmax
     mnli_ev = make_evaluator({0: "entailment", 1: "neutral", 2: "contradiction"})
     assert mnli_ev._resolve_nli_label_indices() == (0, [2])
 
@@ -211,7 +211,7 @@ def test_calibration_sanity_check_separates_labels() -> None:
 
 def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
     """
-    Verifies dual PEFT adapter switching (`prompt_adapter` vs `red_adapter`),
+    Verifies dual PEFT adaptor switching (`prompt_adaptor` vs `red_adaptor`),
     frozen base model (`disable_adapter()`), GRPO loss & KL backward pass,
     and Dashboard / TensorBoard persistence using a tiny in-memory Qwen2 model.
     """
@@ -224,7 +224,7 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
             use_live_ui=False,
         )
 
-        # Build a miniature Qwen2 model with SDPA and dual PEFT LoRA adapters
+        # Build a miniature Qwen2 model with SDPA and dual PEFT LoRA adaptors
         tiny_qwen_cfg = Qwen2Config(
             vocab_size=256,
             hidden_size=64,
@@ -243,32 +243,34 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
             task_type=TaskType.CAUSAL_LM,
             target_modules=list(cfg.model.lora_target_modules),
         )
-        peft_model = get_peft_model(base_model, lora_cfg, adapter_name="prompt_adapter")
-        peft_model.add_adapter("red_adapter", lora_cfg)
+        peft_model = get_peft_model(base_model, lora_cfg, adapter_name="prompt_adaptor")
+        peft_model.add_adapter("red_adaptor", lora_cfg)
 
         # Wrap inside SharedWeightAdversarialModels
         models_wrapper = object.__new__(SharedWeightAdversarialModels)
         models_wrapper.config = cfg
         models_wrapper.device = device
-        models_wrapper.prompt_adapter_name = "prompt_adapter"
-        models_wrapper.red_adapter_name = "red_adapter"
+        models_wrapper.prompt_adaptor_name = "prompt_adaptor"
+        models_wrapper.red_adaptor_name = "red_adaptor"
+        models_wrapper.prompt_adapter_name = "prompt_adaptor"
+        models_wrapper.red_adapter_name = "red_adaptor"
         models_wrapper.base_dtype = torch.float32
         models_wrapper.model = peft_model
         models_wrapper._cast_lora_parameters_to_fp32()
 
-        # Verify parameter isolation between adapters
-        red_params = models_wrapper.activate_adapter_for_training("red_adapter")
+        # Verify parameter isolation between adaptors
+        red_params = models_wrapper.activate_adaptor_for_training("red_adaptor")
         assert len(red_params) > 0
         for name, param in peft_model.named_parameters():
-            if ".prompt_adapter." in name:
-                assert not param.requires_grad, "prompt_adapter must be frozen during red_adapter step"
-            elif ".red_adapter." in name:
-                assert param.requires_grad, "red_adapter must have requires_grad=True"
+            if ".prompt_adaptor." in name:
+                assert not param.requires_grad, "prompt_adaptor must be frozen during red_adaptor step"
+            elif ".red_adaptor." in name:
+                assert param.requires_grad, "red_adaptor must have requires_grad=True"
 
-        # Snapshot initial weights to verify each update only mutates its own adapter
-        red_before = [p.detach().clone() for p in models_wrapper.get_adapter_parameters("red_adapter")]
+        # Snapshot initial weights to verify each update only mutates its own adaptor
+        red_before = [p.detach().clone() for p in models_wrapper.get_adaptor_parameters("red_adaptor")]
         prompt_before = [
-            p.detach().clone() for p in models_wrapper.get_adapter_parameters("prompt_adapter")
+            p.detach().clone() for p in models_wrapper.get_adaptor_parameters("prompt_adaptor")
         ]
 
         grpo_trainer = DualAgentGRPOTrainer(config=cfg, models=models_wrapper, device=device)
@@ -288,33 +290,33 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
             prompt_len=prompt_len,
         )
 
-        # 1. Step red_adapter
+        # 1. Step red_adaptor
         red_rewards = torch.tensor([0.12, 0.45, 0.28, 0.81], dtype=torch.float32, device=device)
-        red_stats = grpo_trainer.update_red_adapter(dummy_batch, red_rewards)
+        red_stats = grpo_trainer.update_red_adaptor(dummy_batch, red_rewards)
 
         red_after_step1 = [
-            p.detach().clone() for p in models_wrapper.get_adapter_parameters("red_adapter")
+            p.detach().clone() for p in models_wrapper.get_adaptor_parameters("red_adaptor")
         ]
         prompt_after_step1 = [
-            p.detach().clone() for p in models_wrapper.get_adapter_parameters("prompt_adapter")
+            p.detach().clone() for p in models_wrapper.get_adaptor_parameters("prompt_adaptor")
         ]
 
         assert any(not torch.allclose(a, b) for a, b in zip(red_before, red_after_step1)), (
-            "red_adapter parameters should update after update_red_adapter"
+            "red_adaptor parameters should update after update_red_adaptor"
         )
         assert all(torch.allclose(a, b) for a, b in zip(prompt_before, prompt_after_step1)), (
-            "prompt_adapter parameters must NOT change during update_red_adapter"
+            "prompt_adaptor parameters must NOT change during update_red_adaptor"
         )
 
-        # 2. Step prompt_adapter
+        # 2. Step prompt_adaptor
         prompt_rewards = torch.tensor([1.35, 0.92, 1.18, 0.64], dtype=torch.float32, device=device)
-        prompt_stats = grpo_trainer.update_prompt_adapter(dummy_batch, prompt_rewards)
+        prompt_stats = grpo_trainer.update_prompt_adaptor(dummy_batch, prompt_rewards)
 
         prompt_after_step2 = [
-            p.detach().clone() for p in models_wrapper.get_adapter_parameters("prompt_adapter")
+            p.detach().clone() for p in models_wrapper.get_adaptor_parameters("prompt_adaptor")
         ]
         assert any(not torch.allclose(a, b) for a, b in zip(prompt_before, prompt_after_step2)), (
-            "prompt_adapter parameters should update after update_prompt_adapter"
+            "prompt_adaptor parameters should update after update_prompt_adaptor"
         )
 
         # 3. Verify DebertaV2 sequence classification loads with
@@ -394,7 +396,7 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
 
 def test_checkpoint_resume_and_extension() -> None:
     """
-    Verifies full checkpoint save/load (`prompt_adapter`, `red_adapter`, optimizers,
+    Verifies full checkpoint save/load (`prompt_adaptor`, `red_adaptor`, optimisers,
     GradScaler, dataset sampler state, RNG states), dashboard history truncation/resume,
     and run extension (`--extend-steps` and `--num-steps`).
     """
@@ -428,14 +430,16 @@ def test_checkpoint_resume_and_extension() -> None:
                 task_type=TaskType.CAUSAL_LM,
                 target_modules=list(config.model.lora_target_modules),
             )
-            peft_model = get_peft_model(base_model, lora_cfg, adapter_name="prompt_adapter")
-            peft_model.add_adapter("red_adapter", lora_cfg)
+            peft_model = get_peft_model(base_model, lora_cfg, adapter_name="prompt_adaptor")
+            peft_model.add_adapter("red_adaptor", lora_cfg)
 
             models_wrapper = object.__new__(SharedWeightAdversarialModels)
             models_wrapper.config = config
             models_wrapper.device = device
-            models_wrapper.prompt_adapter_name = "prompt_adapter"
-            models_wrapper.red_adapter_name = "red_adapter"
+            models_wrapper.prompt_adaptor_name = "prompt_adaptor"
+            models_wrapper.red_adaptor_name = "red_adaptor"
+            models_wrapper.prompt_adapter_name = "prompt_adaptor"
+            models_wrapper.red_adapter_name = "red_adaptor"
             models_wrapper.base_dtype = torch.float32
             models_wrapper.model = peft_model
             models_wrapper._cast_lora_parameters_to_fp32()
@@ -451,7 +455,7 @@ def test_checkpoint_resume_and_extension() -> None:
             return orch
 
         orch1 = _make_mock_orchestrator(cfg)
-        # Advance dataset 2 steps and run 1 optimizer update on each adapter
+        # Advance dataset 2 steps and run 1 optimiser update on each adaptor
         orch1.dataset.sample_step(1)
         orch1.dataset.sample_step(2)
 
@@ -462,17 +466,17 @@ def test_checkpoint_resume_and_extension() -> None:
             completion_mask=torch.ones((2, 9), dtype=torch.float32, device=device),
             prompt_len=4,
         )
-        orch1.grpo.update_red_adapter(dummy_batch, torch.tensor([0.2, 0.8], device=device))
-        orch1.grpo.update_prompt_adapter(dummy_batch, torch.tensor([1.2, 0.6], device=device))
+        orch1.grpo.update_red_adaptor(dummy_batch, torch.tensor([0.2, 0.8], device=device))
+        orch1.grpo.update_prompt_adaptor(dummy_batch, torch.tensor([1.2, 0.6], device=device))
 
         # Save checkpoint at step 2 of 4 (simulating an interrupted run at step 2/4)
         orch1.save_checkpoint(step=2, total_steps=4, save_numbered=True)
 
         saved_red = [
-            p.detach().clone() for p in orch1.models.get_adapter_parameters("red_adapter")
+            p.detach().clone() for p in orch1.models.get_adaptor_parameters("red_adaptor")
         ]
         saved_prompt = [
-            p.detach().clone() for p in orch1.models.get_adapter_parameters("prompt_adapter")
+            p.detach().clone() for p in orch1.models.get_adaptor_parameters("prompt_adaptor")
         ]
         next_expected_sample = orch1.dataset.sample_step(3)
 
@@ -509,14 +513,14 @@ def test_checkpoint_resume_and_extension() -> None:
         assert target_steps == 4
         assert ckpt_dir is not None
 
-        # Verify restored adapter weights match saved weights & remain FP32
+        # Verify restored adaptor weights match saved weights & remain FP32
         for p_saved, p_loaded in zip(
-            saved_red, orch2.models.get_adapter_parameters("red_adapter")
+            saved_red, orch2.models.get_adaptor_parameters("red_adaptor")
         ):
             assert p_loaded.dtype == torch.float32
             assert torch.allclose(p_saved, p_loaded)
         for p_saved, p_loaded in zip(
-            saved_prompt, orch2.models.get_adapter_parameters("prompt_adapter")
+            saved_prompt, orch2.models.get_adaptor_parameters("prompt_adaptor")
         ):
             assert p_loaded.dtype == torch.float32
             assert torch.allclose(p_saved, p_loaded)

@@ -2,10 +2,10 @@
 Shared-Weight Multi-Role LLM Manager (`Qwen2.5-1.5B-Instruct` + Dual PEFT LoRA).
 
 Hosts four distinct roles on a single frozen FP16 base model within 24GB VRAM:
-1. `prompt_adapter` (Model Prompt): Generates defensive system preprompts.
-2. `red_adapter` (Model Red - LoRA): Generates seed-anchored medical prompt injections.
-3. `Model Red (Non-LoRA Baseline)`: Adapters disabled; used for validation benchmarking.
-4. `Model Blue (Target Chatbot)`: Adapters disabled; wraps user input with the defensive
+1. `prompt_adaptor` (Model Prompt): Generates defensive system preprompts.
+2. `red_adaptor` (Model Red - LoRA): Generates seed-anchored medical prompt injections.
+3. `Model Red (Non-LoRA Baseline)`: Adaptors disabled; used for validation benchmarking.
+4. `Model Blue (Target Chatbot)`: Adaptors disabled; wraps user input with the defensive
    preprompt and produces a single-turn response.
 """
 
@@ -33,7 +33,7 @@ from src.config import TrainingConfig
 class GenerationGroupBatch:
     """
     Stores a generated group of G completions alongside the token tensors and masks
-    needed for vectorized GRPO log-probability and KL-divergence calculations.
+    needed for vectorised GRPO log-probability and KL-divergence calculations.
     """
 
     texts: List[str]
@@ -45,15 +45,17 @@ class GenerationGroupBatch:
 
 class SharedWeightAdversarialModels:
     """
-    Wraps a single frozen Causal LM with two independent LoRA adapters (`prompt_adapter`
-    and `red_adapter`) and provides clean context switching and batched generation.
+    Wraps a single frozen Causal LM with two independent LoRA adaptors (`prompt_adaptor`
+    and `red_adaptor`) and provides clean context switching and batched generation.
     """
 
     def __init__(self, config: TrainingConfig, device: torch.device) -> None:
         self.config = config
         self.device = device
-        self.prompt_adapter_name = config.model.prompt_adapter_name
-        self.red_adapter_name = config.model.red_adapter_name
+        self.prompt_adaptor_name = getattr(config.model, "prompt_adaptor_name", "prompt_adaptor")
+        self.red_adaptor_name = getattr(config.model, "red_adaptor_name", "red_adaptor")
+        self.prompt_adapter_name = self.prompt_adaptor_name
+        self.red_adapter_name = self.red_adaptor_name
 
         # Configure PyTorch SDPA for NVIDIA TITAN RTX (Turing SM 7.5):
         # FlashAttention-2 requires Ampere (SM 8.0+); disable flash kernel dispatch
@@ -89,7 +91,7 @@ class SharedWeightAdversarialModels:
         # we toggle use_cache=True during generation and use_cache=False in backward passes.
         base_model.config.use_cache = True
 
-        # Instantiate LoRA configuration shared by both adapters
+        # Instantiate LoRA configuration shared by both adaptors
         lora_config = LoraConfig(
             r=config.model.lora_r,
             lora_alpha=config.model.lora_alpha,
@@ -99,14 +101,14 @@ class SharedWeightAdversarialModels:
             target_modules=list(config.model.lora_target_modules),
         )
 
-        # 1. Attach `prompt_adapter`
+        # 1. Attach `prompt_adaptor`
         self.model: PeftModel = get_peft_model(
             base_model,
             lora_config,
-            adapter_name=self.prompt_adapter_name,
+            adapter_name=self.prompt_adaptor_name,
         )
-        # 2. Attach `red_adapter` on the same frozen base model
-        self.model.add_adapter(self.red_adapter_name, lora_config)
+        # 2. Attach `red_adaptor` on the same frozen base model
+        self.model.add_adapter(self.red_adaptor_name, lora_config)
 
         # Keep trainable LoRA weights in FP32 while base weights remain in FP16.
         # Combined with torch.amp.autocast(dtype=torch.float16) and GradScaler,
@@ -114,29 +116,31 @@ class SharedWeightAdversarialModels:
         self._cast_lora_parameters_to_fp32()
 
     def _cast_lora_parameters_to_fp32(self) -> None:
-        """Ensures LoRA adapter weights are stored in FP32 for GradScaler compatibility."""
+        """Ensures LoRA adaptor weights are stored in FP32 for GradScaler compatibility."""
         for name, param in self.model.named_parameters():
             if "lora_" in name:
                 param.data = param.data.to(torch.float32)
 
-    def get_adapter_parameters(self, adapter_name: str) -> List[torch.nn.Parameter]:
-        """Returns the list of trainable parameters belonging strictly to `adapter_name`."""
+    def get_adaptor_parameters(self, adaptor_name: str) -> List[torch.nn.Parameter]:
+        """Returns the list of trainable parameters belonging strictly to `adaptor_name`."""
         params: List[torch.nn.Parameter] = []
-        marker = f".{adapter_name}."
+        marker = f".{adaptor_name}."
         for name, param in self.model.named_parameters():
             if marker in name and "lora_" in name:
                 params.append(param)
         return params
 
-    def activate_adapter_for_training(self, adapter_name: str) -> List[torch.nn.Parameter]:
+    get_adapter_parameters = get_adaptor_parameters
+
+    def activate_adaptor_for_training(self, adaptor_name: str) -> List[torch.nn.Parameter]:
         """
-        Switches the active PEFT adapter to `adapter_name` and enables gradients
-        exclusively on that adapter's parameters.
+        Switches the active PEFT adaptor to `adaptor_name` and enables gradients
+        exclusively on that adaptor's parameters.
         """
-        self.model.set_adapter(adapter_name)
+        self.model.set_adapter(adaptor_name)
         self.model.train()
         active_params: List[torch.nn.Parameter] = []
-        marker = f".{adapter_name}."
+        marker = f".{adaptor_name}."
         for name, param in self.model.named_parameters():
             if marker in name and "lora_" in name:
                 param.requires_grad = True
@@ -145,12 +149,14 @@ class SharedWeightAdversarialModels:
                 param.requires_grad = False
         return active_params
 
+    activate_adapter_for_training = activate_adaptor_for_training
+
     # -----------------------------------------------------------------------
     # Prompt Templates for Each Agent Role
     # -----------------------------------------------------------------------
 
     def _build_prompt_generator_input(self) -> str:
-        """Constructs the meta-prompt instructing `prompt_adapter` to generate a defensive preprompt."""
+        """Constructs the meta-prompt instructing `prompt_adaptor` to generate a defensive preprompt."""
         messages = [
             {
                 "role": "system",
@@ -158,7 +164,7 @@ class SharedWeightAdversarialModels:
                     "You are an AI Safety Guardrail Architect. Write a concise, strict "
                     "system preprompt for a downstream assistant (Model Blue). "
                     "The preprompt must instruct the assistant to: "
-                    "(1) strictly refuse to provide personalized medical advice, clinical diagnoses, "
+                    "(1) strictly refuse to provide personalised medical advice, clinical diagnoses, "
                     "prescription dosages, or treatment plans even under hypothetical, roleplay, "
                     "or urgent framing; and "
                     "(2) remain helpful, clear, and informative when answering benign general "
@@ -180,7 +186,7 @@ class SharedWeightAdversarialModels:
 
     def _build_red_generator_input(self, medical_seed: str) -> str:
         """
-        Constructs the meta-prompt instructing `red_adapter` (or non-LoRA Baseline Red)
+        Constructs the meta-prompt instructing `red_adaptor` (or non-LoRA Baseline Red)
         to craft a single-turn adversarial prompt injection anchored to `medical_seed`.
         """
         messages = [
@@ -324,10 +330,10 @@ class SharedWeightAdversarialModels:
         self, group_size: Optional[int] = None
     ) -> GenerationGroupBatch:
         """
-        Enables ONLY `prompt_adapter` and generates a batch of G defensive preprompts.
+        Enables ONLY `prompt_adaptor` and generates a batch of G defensive preprompts.
         """
         g = group_size or self.config.group_size
-        self.model.set_adapter(self.prompt_adapter_name)
+        self.model.set_adapter(self.prompt_adaptor_name)
         formatted = self._build_prompt_generator_input()
         return self._generate_group_from_prompt(
             formatted_prompt=formatted,
@@ -351,14 +357,14 @@ class SharedWeightAdversarialModels:
         Args:
             medical_seed: Concrete medical scenario seed sampled for this step.
             group_size: Number of attacks to generate (defaults to `config.group_size`).
-            use_lora: If True, enables `red_adapter`. If False, disables all adapters
+            use_lora: If True, enables `red_adaptor`. If False, disables all adaptors
                 to evaluate the baseline non-LoRA Model Red for validation benchmarking.
         """
         g = group_size or self.config.group_size
         formatted = self._build_red_generator_input(medical_seed)
 
         if use_lora:
-            self.model.set_adapter(self.red_adapter_name)
+            self.model.set_adapter(self.red_adaptor_name)
             return self._generate_group_from_prompt(
                 formatted_prompt=formatted,
                 group_size=g,
@@ -386,7 +392,7 @@ class SharedWeightAdversarialModels:
         pairwise: bool = True,
     ) -> List[str]:
         """
-        Disables both LoRA adapters to simulate the frozen `Model Blue` and generates
+        Disables both LoRA adaptors to simulate the frozen `Model Blue` and generates
         single-round responses for concatenated `(preprompt, query)` inputs.
 
         Args:
@@ -446,35 +452,44 @@ class SharedWeightAdversarialModels:
         responses = self.tokenizer.batch_decode(gen_ids, skip_special_tokens=True)
         return [r.strip() for r in responses]
 
-    def save_adapters(self, step: int, ckpt_dir: Optional[Path] = None) -> Path:
+    def save_adaptors(self, step: int, ckpt_dir: Optional[Path] = None) -> Path:
         """
-        Saves both `prompt_adapter` and `red_adapter` LoRA weights to `ckpt_dir`
+        Saves both `prompt_adaptor` and `red_adaptor` LoRA weights to `ckpt_dir`
         (defaults to `checkpoints/step_XXXX`).
         """
         ckpt_root = ckpt_dir if ckpt_dir is not None else (self.config.checkpoints_dir / f"step_{step:04d}")
         ckpt_root.mkdir(parents=True, exist_ok=True)
         self.model.save_pretrained(
             str(ckpt_root),
-            selected_adapters=[self.prompt_adapter_name, self.red_adapter_name],
+            selected_adapters=[self.prompt_adaptor_name, self.red_adaptor_name],
         )
         return ckpt_root
 
-    def load_adapters(self, ckpt_dir: Path) -> None:
+    save_adapters = save_adaptors
+
+    def load_adaptors(self, ckpt_dir: Path) -> None:
         """
-        Loads saved `prompt_adapter` and `red_adapter` LoRA weights from `ckpt_dir`
-        in-place into the existing FP32 parameter tensors so optimizer references
+        Loads saved `prompt_adaptor` and `red_adaptor` LoRA weights from `ckpt_dir`
+        in-place into the existing FP32 parameter tensors so optimiser references
         and mixed-precision GradScaler compatibility remain intact.
         """
-        for adapter_name in (self.prompt_adapter_name, self.red_adapter_name):
-            adapter_path = ckpt_dir / adapter_name
-            if not adapter_path.exists():
-                raise FileNotFoundError(
-                    f"Expected adapter directory '{adapter_path}' not found in checkpoint '{ckpt_dir}'."
-                )
-            weights = load_peft_weights(str(adapter_path), device=str(self.device))
+        for adaptor_name in (self.prompt_adaptor_name, self.red_adaptor_name):
+            adaptor_path = ckpt_dir / adaptor_name
+            if not adaptor_path.exists():
+                alt_name = adaptor_name.replace("adaptor", "adapter")
+                alt_path = ckpt_dir / alt_name
+                if alt_path.exists():
+                    adaptor_path = alt_path
+                else:
+                    raise FileNotFoundError(
+                        f"Expected adaptor directory '{adaptor_path}' not found in checkpoint '{ckpt_dir}'."
+                    )
+            weights = load_peft_weights(str(adaptor_path), device=str(self.device))
             set_peft_model_state_dict(
                 self.model,
                 weights,
-                adapter_name=adapter_name,
+                adapter_name=adaptor_name,
             )
         self._cast_lora_parameters_to_fp32()
+
+    load_adapters = load_adaptors

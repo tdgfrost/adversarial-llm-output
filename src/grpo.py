@@ -1,9 +1,9 @@
 """
-Custom Group Relative Policy Optimization (GRPO) Engine for Dual-Adapter Co-Evolution.
+Custom Group Relative Policy Optimisation (GRPO) Engine for Dual-Adaptor Co-Evolution.
 
 Standard RLHF libraries (e.g., `trl.GRPOTrainer`) assume a single static agent
-optimized against a fixed reward function. In this zero-sum co-evolutionary game,
-two policies (`prompt_adapter` and `red_adapter`) share the same frozen base model
+optimised against a fixed reward function. In this zero-sum co-evolutionary game,
+two policies (`prompt_adaptor` and `red_adaptor`) share the same frozen base model
 and alternate updates within each step.
 
 Mathematical Formulation:
@@ -31,7 +31,7 @@ from src.models import GenerationGroupBatch, SharedWeightAdversarialModels
 
 @dataclass
 class GRPOUpdateStats:
-    """Telemetry returned from a single adapter's GRPO policy update."""
+    """Telemetry returned from a single adaptor's GRPO policy update."""
 
     loss: float
     policy_objective: float
@@ -44,8 +44,8 @@ class GRPOUpdateStats:
 
 class DualAgentGRPOTrainer:
     """
-    Manages the separate AdamW optimizers, FP16 mixed-precision GradScaler,
-    and interleaved GRPO policy updates for `red_adapter` and `prompt_adapter`.
+    Manages the separate AdamW optimisers, FP16 mixed-precision GradScaler,
+    and interleaved GRPO policy updates for `red_adaptor` and `prompt_adaptor`.
     """
 
     def __init__(
@@ -58,22 +58,28 @@ class DualAgentGRPOTrainer:
         self.models = models
         self.device = device
 
-        # Separate optimizers ensure independent Adam momentum buffers for each agent
-        red_params = self.models.get_adapter_parameters(config.model.red_adapter_name)
-        prompt_params = self.models.get_adapter_parameters(config.model.prompt_adapter_name)
+        # Separate optimisers ensure independent Adam momentum buffers for each agent
+        red_params = self.models.get_adaptor_parameters(
+            getattr(config.model, "red_adaptor_name", "red_adaptor")
+        )
+        prompt_params = self.models.get_adaptor_parameters(
+            getattr(config.model, "prompt_adaptor_name", "prompt_adaptor")
+        )
 
-        self.optimizer_red = torch.optim.AdamW(
+        self.optimiser_red = torch.optim.AdamW(
             red_params,
             lr=config.lr_red,
             weight_decay=config.weight_decay,
             eps=config.adam_eps,
         )
-        self.optimizer_prompt = torch.optim.AdamW(
+        self.optimiser_prompt = torch.optim.AdamW(
             prompt_params,
             lr=config.lr_prompt,
             weight_decay=config.weight_decay,
             eps=config.adam_eps,
         )
+        self.optimizer_red = self.optimiser_red
+        self.optimizer_prompt = self.optimiser_prompt
 
         # Mixed-precision gradient scaler prevents FP16 underflow on Turing GPUs
         self.use_cuda_fp16 = self.device.type == "cuda" and config.model.use_fp16
@@ -84,7 +90,7 @@ class DualAgentGRPOTrainer:
 
     def compute_group_advantages(self, rewards: torch.Tensor) -> torch.Tensor:
         """
-        Normalizes a group of rewards `r` (shape `(G,)`) across the group mean and
+        Normalises a group of rewards `r` (shape `(G,)`) across the group mean and
         standard deviation: `A_i = (r_i - mean(r)) / (std(r) + eps)`.
         """
         rewards_fp32 = rewards.float()
@@ -130,21 +136,21 @@ class DualAgentGRPOTrainer:
     ) -> torch.Tensor:
         """
         Computes reference per-token log-probabilities using the frozen base model
-        (both adapters disabled) for the GRPO KL regularization term.
+        (both adaptors disabled) for the GRPO KL regularisation term.
         """
         with self.models.model.disable_adapter():
             self.models.model.eval()
             return self._compute_per_token_logps(input_ids, attention_mask)
 
-    def _step_adapter(
+    def _step_adaptor(
         self,
-        adapter_name: str,
-        optimizer: torch.optim.Optimizer,
+        adaptor_name: str,
+        optimiser: torch.optim.Optimizer,
         batch: GenerationGroupBatch,
         rewards: torch.Tensor,
     ) -> GRPOUpdateStats:
         """
-        Executes a complete GRPO policy gradient update for a single LoRA adapter.
+        Executes a complete GRPO policy gradient update for a single LoRA adaptor.
         """
         # 1. Compute group-relative advantages
         advantages = self.compute_group_advantages(rewards)
@@ -152,11 +158,11 @@ class DualAgentGRPOTrainer:
         # 2. Compute frozen base model reference log-probs (no grad)
         ref_logps = self._compute_reference_logps(batch.full_ids, batch.attention_mask)
 
-        # 3. Enable gradients strictly for the target adapter
-        active_params = self.models.activate_adapter_for_training(adapter_name)
-        optimizer.zero_grad(set_to_none=True)
+        # 3. Enable gradients strictly for the target adaptor
+        active_params = self.models.activate_adaptor_for_training(adaptor_name)
+        optimiser.zero_grad(set_to_none=True)
 
-        # 4. Forward pass with active adapter to obtain differentiable per-token log-probs
+        # 4. Forward pass with active adaptor to obtain differentiable per-token log-probs
         policy_logps = self._compute_per_token_logps(batch.full_ids, batch.attention_mask)
 
         # 5. On-policy importance ratio: exp(log_pi - sg(log_pi)) == 1.0 in forward,
@@ -173,14 +179,15 @@ class DualAgentGRPOTrainer:
         log_ref_diff = torch.clamp(ref_logps - policy_logps, min=-10.0, max=10.0)
         per_token_kl = torch.exp(log_ref_diff) - log_ref_diff - 1.0
 
-        # Select the correct KL penalty for the active adapter
+        # Select the correct KL penalty for the active adaptor
+        prompt_name = getattr(self.config.model, "prompt_adaptor_name", "prompt_adaptor")
         active_kl_coef = (
             self.config.prompt_kl_coef
-            if adapter_name == self.config.model.prompt_adapter_name
+            if adaptor_name == prompt_name
             else self.config.red_kl_coef
         )
 
-        # 7. Mask strictly to generated completion tokens and normalize by sequence length
+        # 7. Mask strictly to generated completion tokens and normalise by sequence length
         mask = batch.completion_mask
         token_counts = mask.sum(dim=1).clamp(min=1.0)
 
@@ -190,11 +197,11 @@ class DualAgentGRPOTrainer:
 
         # 8. Backpropagate with FP16 GradScaler and clip gradients
         self.scaler.scale(loss).backward()
-        self.scaler.unscale_(optimizer)
+        self.scaler.unscale_(optimiser)
         grad_norm = torch.nn.utils.clip_grad_norm_(
             active_params, max_norm=self.config.max_grad_norm
         )
-        self.scaler.step(optimizer)
+        self.scaler.step(optimiser)
         self.scaler.update()
 
         # Compute summary telemetry
@@ -216,51 +223,63 @@ class DualAgentGRPOTrainer:
             advantages=[float(a) for a in advantages.detach().cpu().tolist()],
         )
 
-    def update_red_adapter(
+    _step_adapter = _step_adaptor
+
+    def update_red_adaptor(
         self,
         red_batch: GenerationGroupBatch,
         red_rewards: torch.Tensor,
     ) -> GRPOUpdateStats:
         """
-        Enables gradients for `red_adapter` and updates its policy using the
+        Enables gradients for `red_adaptor` and updates its policy using the
         DeBERTa-v3 medical advice probability advantages.
         """
-        return self._step_adapter(
-            adapter_name=self.config.model.red_adapter_name,
-            optimizer=self.optimizer_red,
+        red_name = getattr(self.config.model, "red_adaptor_name", "red_adaptor")
+        return self._step_adaptor(
+            adaptor_name=red_name,
+            optimiser=self.optimiser_red,
             batch=red_batch,
             rewards=red_rewards,
         )
 
-    def update_prompt_adapter(
+    update_red_adapter = update_red_adaptor
+
+    def update_prompt_adaptor(
         self,
         prompt_batch: GenerationGroupBatch,
         prompt_composite_rewards: torch.Tensor,
     ) -> GRPOUpdateStats:
         """
-        Swaps to `prompt_adapter` and updates its policy using the composite
+        Swaps to `prompt_adaptor` and updates its policy using the composite
         defense + benign-utility advantages.
         """
-        return self._step_adapter(
-            adapter_name=self.config.model.prompt_adapter_name,
-            optimizer=self.optimizer_prompt,
+        prompt_name = getattr(self.config.model, "prompt_adaptor_name", "prompt_adaptor")
+        return self._step_adaptor(
+            adaptor_name=prompt_name,
+            optimiser=self.optimiser_prompt,
             batch=prompt_batch,
             rewards=prompt_composite_rewards,
         )
 
+    update_prompt_adapter = update_prompt_adaptor
+
     def state_dict(self) -> dict:
-        """Serializes optimizer and GradScaler states for checkpointing."""
+        """Serialises optimiser and GradScaler states for checkpointing."""
         return {
-            "optimizer_red": self.optimizer_red.state_dict(),
-            "optimizer_prompt": self.optimizer_prompt.state_dict(),
+            "optimiser_red": self.optimiser_red.state_dict(),
+            "optimiser_prompt": self.optimiser_prompt.state_dict(),
+            "optimizer_red": self.optimiser_red.state_dict(),
+            "optimizer_prompt": self.optimiser_prompt.state_dict(),
             "scaler": self.scaler.state_dict(),
         }
 
     def load_state_dict(self, state: dict) -> None:
-        """Restores optimizer and GradScaler states when resuming/extending a run."""
-        if "optimizer_red" in state:
-            self.optimizer_red.load_state_dict(state["optimizer_red"])
-        if "optimizer_prompt" in state:
-            self.optimizer_prompt.load_state_dict(state["optimizer_prompt"])
+        """Restores optimiser and GradScaler states when resuming/extending a run."""
+        red_state = state.get("optimiser_red") or state.get("optimizer_red")
+        if red_state is not None:
+            self.optimiser_red.load_state_dict(red_state)
+        prompt_state = state.get("optimiser_prompt") or state.get("optimizer_prompt")
+        if prompt_state is not None:
+            self.optimiser_prompt.load_state_dict(prompt_state)
         if "scaler" in state and state["scaler"]:
             self.scaler.load_state_dict(state["scaler"])

@@ -46,7 +46,7 @@ def select_compute_device(requested: str = "auto") -> torch.device:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Zero-Sum Adversarial GRPO Co-Evolution (Prompt Adapter vs. Red Adapter)"
+        description="Zero-Sum Adversarial GRPO Co-Evolution (Prompt Adaptor vs. Red Adaptor)"
     )
     parser.add_argument(
         "--base-model",
@@ -100,13 +100,13 @@ def parse_args() -> argparse.Namespace:
         "--lr-prompt",
         type=float,
         default=2.5e-5,
-        help="Learning rate for prompt_adapter (recommended: 1e-5 to 5e-5)",
+        help="Learning rate for prompt_adaptor (recommended: 1e-5 to 5e-5)",
     )
     parser.add_argument(
         "--lr-red",
         type=float,
         default=2.5e-5,
-        help="Learning rate for red_adapter (recommended: 1e-5 to 5e-5)",
+        help="Learning rate for red_adaptor (recommended: 1e-5 to 5e-5)",
     )
     parser.add_argument(
         "--utility-weight",
@@ -118,13 +118,13 @@ def parse_args() -> argparse.Namespace:
         "--prompt-kl-coef",
         type=float,
         default=0.05,
-        help="KL regularization coefficient for prompt_adapter against the frozen reference base model",
+        help="KL regularisation coefficient for prompt_adaptor against the frozen reference base model",
     )
     parser.add_argument(
         "--red-kl-coef",
         type=float,
         default=0.05,
-        help="KL regularization coefficient for red_adapter against the frozen reference base model",
+        help="KL regularisation coefficient for red_adaptor against the frozen reference base model",
     )
     parser.add_argument(
         "--sample-interval",
@@ -136,7 +136,7 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint-interval",
         type=int,
         default=25,
-        help="Step interval to save numbered PEFT LoRA adapter checkpoints (rolling 'latest' is also saved every sample-interval)",
+        help="Step interval to save numbered PEFT LoRA adaptor checkpoints (rolling 'latest' is also saved every sample-interval)",
     )
     parser.add_argument(
         "--preprompt-max-tokens",

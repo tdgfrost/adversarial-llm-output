@@ -8,5 +8,6 @@ __pycache__/
 .pytest_cache/
 
 # Mounted experimental outputs (keep folder, ignore generated run artifacts)
+experimental_results
 experimental_results/*
 !experimental_results/.gitkeep

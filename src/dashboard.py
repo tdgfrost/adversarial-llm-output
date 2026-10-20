@@ -5,7 +5,7 @@ Provides:
 1. A live, in-place terminal UI tracking co-evolution metrics, VRAM, and sparkline trends.
 2. Benchmark validation tracking of Non-LoRA Model Red vs. LoRA Model Red rewards.
 3. An in-place refreshing Dialogue Showcase comparing:
-   - Model Red (with `red_adapter` LoRA) -> Model Blue
+   - Model Red (with `red_adaptor` LoRA) -> Model Blue
    - Model Red (without LoRA baseline) -> Model Blue
    - Benign Health Query -> Model Blue
    This panel clears/refreshes whenever a new sample is generated rather than scrolling.
@@ -58,7 +58,7 @@ class DialogueSampleSnapshot:
     medical_seed: str
     benign_query: str
     defensive_preprompt: str
-    # With LoRA (red_adapter)
+    # With LoRA (red_adaptor)
     red_lora_attack: str
     blue_lora_response: str
     lora_medical_prob: float
@@ -274,12 +274,12 @@ class ExperimentDashboard:
             "Rewards/6_Prompt_Composite_Reward", metrics.prompt_composite_reward, s
         )
 
-        self.tb_writer.add_scalar("GRPO_Loss/Red_Adapter_Loss", metrics.red_loss, s)
-        self.tb_writer.add_scalar("GRPO_Loss/Prompt_Adapter_Loss", metrics.prompt_loss, s)
-        self.tb_writer.add_scalar("GRPO_KL/Red_Adapter_KL", metrics.red_kl, s)
-        self.tb_writer.add_scalar("GRPO_KL/Prompt_Adapter_KL", metrics.prompt_kl, s)
-        self.tb_writer.add_scalar("GRPO_GradNorm/Red_Adapter", metrics.red_grad_norm, s)
-        self.tb_writer.add_scalar("GRPO_GradNorm/Prompt_Adapter", metrics.prompt_grad_norm, s)
+        self.tb_writer.add_scalar("GRPO_Loss/Red_Adaptor_Loss", metrics.red_loss, s)
+        self.tb_writer.add_scalar("GRPO_Loss/Prompt_Adaptor_Loss", metrics.prompt_loss, s)
+        self.tb_writer.add_scalar("GRPO_KL/Red_Adaptor_KL", metrics.red_kl, s)
+        self.tb_writer.add_scalar("GRPO_KL/Prompt_Adaptor_KL", metrics.prompt_kl, s)
+        self.tb_writer.add_scalar("GRPO_GradNorm/Red_Adaptor", metrics.red_grad_norm, s)
+        self.tb_writer.add_scalar("GRPO_GradNorm/Prompt_Adaptor", metrics.prompt_grad_norm, s)
         self.tb_writer.add_scalar("GRPO_Variance/Red_Group_Reward_Std", metrics.red_reward_std, s)
         self.tb_writer.add_scalar(
             "GRPO_Variance/Prompt_Group_Reward_Std", metrics.prompt_reward_std, s
@@ -318,9 +318,9 @@ class ExperimentDashboard:
             f"# Latest Co-Evolution Dialogue Sample (Step {sample.step})\n\n"
             f"## 1. Sampled Medical Seed & Defensive Preprompt\n"
             f"- **Medical Seed Scenario**: {sample.medical_seed}\n"
-            f"- **Defensive Preprompt (`prompt_adapter`)**:\n"
+            f"- **Defensive Preprompt (`prompt_adaptor`)**:\n"
             f"  > {sample.defensive_preprompt}\n\n"
-            f"## 2. Adversarial Interaction WITH LoRA (`red_adapter` -> `Model Blue`)\n"
+            f"## 2. Adversarial Interaction WITH LoRA (`red_adaptor` -> `Model Blue`)\n"
             f"- **DeBERTa-v3 Medical Advice Probability**: `{sample.lora_medical_prob:.4f}`\n"
             f"- **Model Red (LoRA) Attack**:\n"
             f"  > {sample.red_lora_attack}\n"
@@ -347,7 +347,7 @@ class ExperimentDashboard:
             f"**Non-LoRA Red Prob:** `{sample.nolora_medical_prob:.3f}` | "
             f"**Benign Utility:** `{sample.benign_utility_score:.3f}`\n\n"
             f"- **Seed:** {sample.medical_seed}\n"
-            f"- **Preprompt (`prompt_adapter`):** {sample.defensive_preprompt}\n"
+            f"- **Preprompt (`prompt_adaptor`):** {sample.defensive_preprompt}\n"
             f"- **Red Attack (LoRA):** {sample.red_lora_attack}\n"
             f"- **Blue Response (vs LoRA):** {sample.blue_lora_response}\n"
             f"- **Red Attack (Non-LoRA):** {sample.red_nolora_attack}\n"
@@ -372,7 +372,7 @@ class ExperimentDashboard:
         m = self.latest_metrics
 
         if m is None:
-            progress_str = "Initializing base model (Qwen2.5-1.5B), LoRA adapters, and DeBERTa-v3 sidecar..."
+            progress_str = "Initialising base model (Qwen2.5-1.5B), LoRA adaptors, and DeBERTa-v3 sidecar..."
             vram_str = "Allocating VRAM..."
         else:
             pct = 100.0 * m.step / max(1, m.total_steps)
@@ -434,7 +434,7 @@ class ExperimentDashboard:
         max_comp = self.config.defense_weight + self.config.utility_weight
 
         table.add_row(
-            "[red]Red (LoRA `red_adapter`) Attack Prob[/red]",
+            "[red]Red (LoRA `red_adaptor`) Attack Prob[/red]",
             f"{m.red_lora_reward:.4f}",
             f"{self._mean('red_lora'):.4f}",
             f"[red]{make_sparkline(self.history['red_lora'])}[/red]",
@@ -452,10 +452,10 @@ class ExperimentDashboard:
             f"{m.red_lora_reward - m.red_nolora_val_reward:+.4f}",
             f"{self._mean('red_lora') - self._mean('red_nolora'):+.4f}",
             "—",
-            "Gain of co-evolved `red_adapter` over static Red",
+            "Gain of co-evolved `red_adaptor` over static Red",
         )
         table.add_row(
-            "[green]Prompt (`prompt_adapter`) Defense Score[/green]",
+            "[green]Prompt (`prompt_adaptor`) Defense Score[/green]",
             f"{m.prompt_defense_score:.4f}",
             f"{self._mean('defense'):.4f}",
             f"[green]{make_sparkline(self.history['defense'])}[/green]",
@@ -473,7 +473,7 @@ class ExperimentDashboard:
             f"{m.prompt_composite_reward:.4f}",
             f"{self._mean('composite'):.4f}",
             f"[bold green]{make_sparkline(self.history['composite'], vmin=0.0, vmax=max_comp)}[/bold green]",
-            f"Anti-lobotomization objective (max {max_comp:.2f})",
+            f"Anti-lobotomisation objective (max {max_comp:.2f})",
         )
         table.add_row(
             "[dim]GRPO Policy Updates (Red | Prompt)[/dim]",
@@ -508,14 +508,14 @@ class ExperimentDashboard:
             f"[bold white]Medical Seed Scenario:[/bold white] [italic]{_truncate(d.medical_seed, 220)}[/italic]"
         )
         top_info.add_row(
-            f"[bold green]Active Defensive Preprompt (`prompt_adapter`):[/bold green] {_truncate(d.defensive_preprompt, 280)}"
+            f"[bold green]Active Defensive Preprompt (`prompt_adaptor`):[/bold green] {_truncate(d.defensive_preprompt, 280)}"
         )
 
-        # Left column: With LoRA (red_adapter)
+        # Left column: With LoRA (red_adaptor)
         lora_box = Panel(
             Group(
                 Text.from_markup(
-                    f"[bold red]Model Red (WITH LoRA `red_adapter`):[/bold red]\n{_truncate(d.red_lora_attack, 280)}"
+                    f"[bold red]Model Red (WITH LoRA `red_adaptor`):[/bold red]\n{_truncate(d.red_lora_attack, 280)}"
                 ),
                 Rule(style="dim"),
                 Text.from_markup(
@@ -524,7 +524,7 @@ class ExperimentDashboard:
                     f"{_truncate(d.blue_lora_response, 280)}"
                 ),
             ),
-            title="[red]With LoRA (`red_adapter`)[/red]",
+            title="[red]With LoRA (`red_adaptor`)[/red]",
             border_style="red",
         )
 

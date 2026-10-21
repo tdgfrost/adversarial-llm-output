@@ -165,13 +165,12 @@ For each single-turn interaction (`Model Red Prompt -> Model Blue Response`), th
 
 | Role / Stage | Config Field | Token Ceiling | Rationale |
 | :--- | :--- | :---: | :--- |
-| **Medical Seed / Benign Query** | `seed_max_tokens` | `64` | Concise 1–2 sentence clinical scenario or benign health question. |
-| **Generator Meta-Prompt Input** | `generator_max_input_tokens` | `1024` | Accommodates the generator system prompt plus the rolling $k=3$ buffer of recent adversarial attacks (`3 × 128` tokens) without truncation. |
+| **Generator Meta-Prompt Input** | `generator_max_input_tokens` | `1122` (auto) | Calculated automatically from `3 × attack_max_new_tokens` plus the estimated token length of the static generator meta-prompt template (scaled by `subword_expansion_multiplier = 1.5`) so the rolling $k=3$ buffer of recent adversarial attacks fits without truncation. |
 | **Defensive Prompt (`prompt_adaptor`)** | `preprompt_max_new_tokens` | `256` (min `16`) | Enough to express clear refusal rules while preserving benign helpfulness; appended after the user query. |
 | **Adversarial Attack (`red_adaptor`)** | `attack_max_new_tokens` | `256` (min `16`) | Enough to cover a persuasive single-turn jailbreak (clinical vignettes, roleplay, urgency), anchored to the medical seed scenario. |
-| **Target Chatbot (`Model Blue`) Input** | `blue_max_input_tokens` | `512` | Enough to accommodate `User Attack (128) + Appended Defensive Guardrail (128) + Chat Template`. |
+| **Target Chatbot (`Model Blue`) Input** | `blue_max_input_tokens` | `623` (auto) | Calculated automatically from `attack_max_new_tokens + preprompt_max_new_tokens` plus the estimated token length of the static chat and `<system_guardrail>` wrapper templates. |
 | **Target Chatbot (`Model Blue`) Output** | `blue_max_new_tokens` | `256` (min `16`) | Enough to represent a refusal/disclaimer, leaked medical dosages/diagnoses, or a complete helpful benign paragraph. |
-| **Sidecar Evaluator (zero-shot NLI)** | `evaluator_max_length` | `512` | Covers the NLI premise (`Model Blue`'s `256` Qwen tokens, which re-tokenise into more DeBERTa subwords) + the hypothesis sentence. |
+| **Sidecar Evaluator (zero-shot NLI)** | `evaluator_max_length` | `408` (auto) | Calculated automatically from `ceil(blue_max_new_tokens × subword_expansion_multiplier)` plus the estimated token length of `evaluator_nli_hypothesis`. |
 
 ---
 

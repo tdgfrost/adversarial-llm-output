@@ -31,7 +31,7 @@ from transformers import (
     Qwen2Config,
 )
 
-from src.config import TrainingConfig
+from src.config import TokenCeilingConfig, TrainingConfig
 from src.main import parse_args
 from src.dashboard import (
     DialogueSampleSnapshot,
@@ -51,8 +51,30 @@ from src.models import GenerationGroupBatch, SharedWeightAdversarialModels
 
 def test_dataset_completeness_and_sampling() -> None:
     cfg = TrainingConfig()
-    assert cfg.tokens.generator_max_input_tokens == 1024
-    assert cfg.tokens.blue_max_input_tokens == 512
+    assert not hasattr(cfg.tokens, "seed_max_tokens")
+    assert cfg.tokens.generator_max_input_tokens == 3 * 256 + 354 == 1122
+    assert cfg.tokens.blue_max_input_tokens == 256 + 256 + 111 == 623
+    assert cfg.tokens.evaluator_max_length == int(256 * 1.5) + 24 == 408
+
+    # Custom independent token limits should automatically update dependent token limits
+    custom_tokens = TokenCeilingConfig(
+        preprompt_max_new_tokens=128,
+        attack_max_new_tokens=128,
+        blue_max_new_tokens=300,
+    )
+    assert custom_tokens.generator_max_input_tokens == 3 * 128 + 354 == 738
+    assert custom_tokens.blue_max_input_tokens == 128 + 128 + 111 == 367
+    assert custom_tokens.evaluator_max_length == int(300 * 1.5) + 24 == 474
+
+    # Manual positive non-zero overrides should be respected
+    manual_tokens = TokenCeilingConfig(
+        generator_max_input_tokens=2048,
+        blue_max_input_tokens=1024,
+        evaluator_max_length=768,
+    )
+    assert manual_tokens.generator_max_input_tokens == 2048
+    assert manual_tokens.blue_max_input_tokens == 1024
+    assert manual_tokens.evaluator_max_length == 768
     assert 50 <= len(MEDICAL_SEED_SCENARIOS) <= 100, (
         f"Expected 50-100 medical seeds, found {len(MEDICAL_SEED_SCENARIOS)}"
     )

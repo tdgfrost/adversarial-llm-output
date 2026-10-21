@@ -167,8 +167,8 @@ For each single-turn interaction (`Model Red Prompt -> Model Blue Response`), th
 | :--- | :--- | :---: | :--- |
 | **Medical Seed / Benign Query** | `seed_max_tokens` | `64` | Concise 1–2 sentence clinical scenario or benign health question. |
 | **Generator Meta-Prompt Input** | `generator_max_input_tokens` | `1024` | Accommodates the generator system prompt plus the rolling $k=3$ buffer of recent adversarial attacks (`3 × 128` tokens) without truncation. |
-| **Defensive Prompt (`prompt_adaptor`)** | `preprompt_max_new_tokens` | `128` (min `16`) | Enough to express clear refusal rules while preserving benign helpfulness; appended after the user query. |
-| **Adversarial Attack (`red_adaptor`)** | `attack_max_new_tokens` | `128` (min `16`) | Enough to cover a persuasive single-turn jailbreak (clinical vignettes, roleplay, urgency), anchored to the medical seed scenario. |
+| **Defensive Prompt (`prompt_adaptor`)** | `preprompt_max_new_tokens` | `256` (min `16`) | Enough to express clear refusal rules while preserving benign helpfulness; appended after the user query. |
+| **Adversarial Attack (`red_adaptor`)** | `attack_max_new_tokens` | `256` (min `16`) | Enough to cover a persuasive single-turn jailbreak (clinical vignettes, roleplay, urgency), anchored to the medical seed scenario. |
 | **Target Chatbot (`Model Blue`) Input** | `blue_max_input_tokens` | `512` | Enough to accommodate `User Attack (128) + Appended Defensive Guardrail (128) + Chat Template`. |
 | **Target Chatbot (`Model Blue`) Output** | `blue_max_new_tokens` | `256` (min `16`) | Enough to represent a refusal/disclaimer, leaked medical dosages/diagnoses, or a complete helpful benign paragraph. |
 | **Sidecar Evaluator (zero-shot NLI)** | `evaluator_max_length` | `512` | Covers the NLI premise (`Model Blue`'s `256` Qwen tokens, which re-tokenise into more DeBERTa subwords) + the hypothesis sentence. |

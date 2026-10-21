@@ -179,9 +179,9 @@ For each single-turn interaction (`Model Red Prompt -> Model Blue Response`), th
 
 Some fun examples of text generated whilst running this experiment:
 
-![Example of a Red attack prompt, approaching this as help for writing a research paper.](examples/images/RedAttackExample1.png)
+<img src="examples/images/RedAttackExample1.png" alt="Example of a Red attack prompt, approaching this as help for writing a research paper." width="400">
 
-![Example of a Red attack prompt, pretending the conversation is a consultation and the chatbot is the patient.](examples/images/RedAttackExample2.png)
+<img src="examples/images/RedAttackExample2.png" alt="Example of a Red attack prompt, pretending the conversation is a consultation and the chatbot is the patient." width="400">
 
-![Example of a Red attack prompt, pretending to be a "respected authority in dermatology". The safeguarded Model Blue is not fooled and refuses to provide medical advice.](examples/images/RedAttackBlueDefenceExample1.png)
+<img src="examples/images/RedAttackBlueDefenceExample1.png" alt="Example of a Red attack prompt, pretending to be a &quot;respected authority in dermatology&quot;. The safeguarded Model Blue is not fooled and refuses to provide medical advice." width="400">
 

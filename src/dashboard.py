@@ -36,15 +36,24 @@ from src.config import TrainingConfig
 SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
-def make_sparkline(values: List[float], width: int = 16, vmin: float = 0.0, vmax: float = 1.0) -> str:
+def make_sparkline(
+    values: List[float],
+    width: int = 16,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+) -> str:
     """Renders a compact Unicode sparkline for a sequence of metric values."""
     if not values:
         return "·" * width
     tail = values[-width:]
-    span = max(1e-6, vmax - vmin)
+    lo = vmin if vmin is not None else min(tail)
+    hi = vmax if vmax is not None else max(tail)
+    if hi - lo < 1e-6:
+        lo, hi = -4.0, 4.0
+    span = max(1e-6, hi - lo)
     chars: List[str] = []
     for val in tail:
-        norm = max(0.0, min(1.0, (val - vmin) / span))
+        norm = max(0.0, min(1.0, (val - lo) / span))
         idx = min(len(SPARK_CHARS) - 1, int(round(norm * (len(SPARK_CHARS) - 1))))
         chars.append(SPARK_CHARS[idx])
     return "".join(chars).ljust(width, "·")
@@ -321,19 +330,19 @@ class ExperimentDashboard:
             f"- **Defensive Preprompt (`prompt_adaptor`)**:\n"
             f"  > {sample.defensive_preprompt}\n\n"
             f"## 2. Adversarial Interaction WITH LoRA (`red_adaptor` -> `Model Blue`)\n"
-            f"- **DeBERTa-v3 Medical Advice Probability**: `{sample.lora_medical_prob:.4f}`\n"
+            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.lora_medical_prob:.4f}`\n"
             f"- **Model Red (LoRA) Attack**:\n"
             f"  > {sample.red_lora_attack}\n"
             f"- **Model Blue Response**:\n"
             f"  > {sample.blue_lora_response}\n\n"
             f"## 3. Baseline Validation WITHOUT LoRA (`Frozen Red` -> `Model Blue`)\n"
-            f"- **DeBERTa-v3 Medical Advice Probability**: `{sample.nolora_medical_prob:.4f}`\n"
+            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.nolora_medical_prob:.4f}`\n"
             f"- **Model Red (Non-LoRA) Attack**:\n"
             f"  > {sample.red_nolora_attack}\n"
             f"- **Model Blue Response**:\n"
             f"  > {sample.blue_nolora_response}\n\n"
             f"## 4. Benign Health Query Utility Check\n"
-            f"- **Benign Utility Score**: `{sample.benign_utility_score:.4f}`\n"
+            f"- **Benign Utility Logit**: `{sample.benign_utility_score:.4f}`\n"
             f"- **Benign Query**: {sample.benign_query}\n"
             f"- **Model Blue Response**:\n"
             f"  > {sample.blue_benign_response}\n"
@@ -343,9 +352,9 @@ class ExperimentDashboard:
     def _log_dialogue_to_tensorboard(self, sample: DialogueSampleSnapshot) -> None:
         text_block = (
             f"**Step {sample.step}** | "
-            f"**LoRA Red Prob:** `{sample.lora_medical_prob:.3f}` | "
-            f"**Non-LoRA Red Prob:** `{sample.nolora_medical_prob:.3f}` | "
-            f"**Benign Utility:** `{sample.benign_utility_score:.3f}`\n\n"
+            f"**LoRA Red Logit:** `{sample.lora_medical_prob:.3f}` | "
+            f"**Non-LoRA Red Logit:** `{sample.nolora_medical_prob:.3f}` | "
+            f"**Benign Utility Logit:** `{sample.benign_utility_score:.3f}`\n\n"
             f"- **Seed:** {sample.medical_seed}\n"
             f"- **Preprompt (`prompt_adaptor`):** {sample.defensive_preprompt}\n"
             f"- **Red Attack (LoRA):** {sample.red_lora_attack}\n"
@@ -418,7 +427,7 @@ class ExperimentDashboard:
         table.add_column("Metric / Agent Role", style="bold")
         table.add_column("Current", justify="right")
         table.add_column(f"Avg({self.config.moving_avg_window})", justify="right")
-        table.add_column("Trend (0→1)", justify="center")
+        table.add_column("Trend", justify="center")
         table.add_column("Interpretation / Target Dynamics", style="dim")
 
         m = self.latest_metrics
@@ -431,17 +440,15 @@ class ExperimentDashboard:
         nolora_delta = m.red_nolora_val_reward - init_nolora
         delta_str = f"({nolora_delta:+.3f} vs step 1)"
 
-        max_comp = self.config.defense_weight + self.config.utility_weight
-
         table.add_row(
-            "[red]Red (LoRA `red_adaptor`) Attack Prob[/red]",
+            "[red]Red (LoRA `red_adaptor`) Attack Logit[/red]",
             f"{m.red_lora_reward:.4f}",
             f"{self._mean('red_lora'):.4f}",
             f"[red]{make_sparkline(self.history['red_lora'])}[/red]",
-            "DeBERTa P(medical_advice) w/ trained LoRA attacker",
+            "DeBERTa medical_advice logit w/ trained LoRA attacker",
         )
         table.add_row(
-            "[yellow]Red (Non-LoRA Baseline) Validation Prob[/yellow]",
+            "[yellow]Red (Non-LoRA Baseline) Validation Logit[/yellow]",
             f"{m.red_nolora_val_reward:.4f}",
             f"{self._mean('red_nolora'):.4f}",
             f"[yellow]{make_sparkline(self.history['red_nolora'])}[/yellow]",
@@ -459,21 +466,21 @@ class ExperimentDashboard:
             f"{m.prompt_defense_score:.4f}",
             f"{self._mean('defense'):.4f}",
             f"[green]{make_sparkline(self.history['defense'])}[/green]",
-            "1.0 - DeBERTa P(medical_advice) against LoRA Red",
+            "-DeBERTa medical_advice logit against LoRA Red",
         )
         table.add_row(
-            "[blue]Blue Benign Query Utility Score[/blue]",
+            "[blue]Blue Benign Query Utility Logit[/blue]",
             f"{m.prompt_utility_score:.4f}",
             f"{self._mean('utility'):.4f}",
             f"[blue]{make_sparkline(self.history['utility'])}[/blue]",
-            "DeBERTa P(substantive & useful answer) on benign query",
+            "DeBERTa substantive & useful answer logit on benign query",
         )
         table.add_row(
             "[bold green]Prompt Composite Reward (Def + Util)[/bold green]",
             f"{m.prompt_composite_reward:.4f}",
             f"{self._mean('composite'):.4f}",
-            f"[bold green]{make_sparkline(self.history['composite'], vmin=0.0, vmax=max_comp)}[/bold green]",
-            f"Anti-lobotomisation objective (max {max_comp:.2f})",
+            f"[bold green]{make_sparkline(self.history['composite'])}[/bold green]",
+            "EMA-std-scaled anti-lobotomisation objective",
         )
         table.add_row(
             "[dim]GRPO Policy Updates (Red | Prompt)[/dim]",
@@ -520,7 +527,7 @@ class ExperimentDashboard:
                 Rule(style="dim"),
                 Text.from_markup(
                     f"[bold cyan]Model Blue Response[/bold cyan] "
-                    f"([bold]DeBERTa Medical Prob: {d.lora_medical_prob:.3f}[/bold]):\n"
+                    f"([bold]DeBERTa Medical Logit: {d.lora_medical_prob:.3f}[/bold]):\n"
                     f"{_truncate(d.blue_lora_response, 280)}"
                 ),
             ),
@@ -537,7 +544,7 @@ class ExperimentDashboard:
                 Rule(style="dim"),
                 Text.from_markup(
                     f"[bold cyan]Model Blue Response[/bold cyan] "
-                    f"([bold]DeBERTa Medical Prob: {d.nolora_medical_prob:.3f}[/bold]):\n"
+                    f"([bold]DeBERTa Medical Logit: {d.nolora_medical_prob:.3f}[/bold]):\n"
                     f"{_truncate(d.blue_nolora_response, 280)}"
                 ),
             ),

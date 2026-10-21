@@ -257,6 +257,9 @@ class AdversarialCoEvolutionOrchestrator:
             "last_successful_attack": self._last_successful_attack,
             "grpo_state": self.grpo.state_dict(),
             "dataset_state": self.dataset.state_dict(),
+            "evaluator_state": (
+                self.evaluator.state_dict() if hasattr(self, "evaluator") else {}
+            ),
             "rng_state": rng_state,
         }
 
@@ -300,6 +303,8 @@ class AdversarialCoEvolutionOrchestrator:
                 self.grpo.load_state_dict(state["grpo_state"])
             if "dataset_state" in state:
                 self.dataset.load_state_dict(state["dataset_state"])
+            if "evaluator_state" in state and hasattr(self, "evaluator"):
+                self.evaluator.load_state_dict(state["evaluator_state"])
             if "rng_state" in state:
                 rng = state["rng_state"]
                 if "python" in rng:

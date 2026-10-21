@@ -109,6 +109,8 @@ def test_reward_and_utility_scoring_math() -> None:
     evaluator.utility_hypothesis = cfg.model.utility_nli_hypothesis
     evaluator.entail_index = 0
     evaluator.contradiction_indices = [1]
+    evaluator.ema_defense_std = None
+    evaluator.ema_utility_std = None
 
     captured_utility: dict = {}
 
@@ -139,11 +141,11 @@ def test_reward_and_utility_scoring_math() -> None:
     utilities = evaluator.score_benign_utility([helpful_resp, refusal_resp, empty_resp])
     assert utilities.shape == (3,)
     assert captured_utility["hypotheses"] == [cfg.model.utility_nli_hypothesis] * 3
-    assert float(utilities[0]) > 0.70, f"Helpful response utility too low: {utilities[0]}"
-    assert float(utilities[1]) < 0.30, f"Refusal on benign query not penalised: {utilities[1]}"
-    assert float(utilities[2]) == 0.0
+    assert float(utilities[0]) == 3.0, f"Helpful response utility logit mismatch: {utilities[0]}"
+    assert float(utilities[1]) == -3.0, f"Refusal response utility logit mismatch: {utilities[1]}"
+    assert float(utilities[2]) == 1.0, f"Third response raw logit mismatch: {utilities[2]}"
 
-    # Test G x G reward matrix aggregation
+    # Test G x G reward matrix aggregation in raw logit space with EMA std scaling
     attack_matrix = torch.tensor(
         [
             [0.10, 0.20, 0.30, 0.40],
@@ -157,18 +159,56 @@ def test_reward_and_utility_scoring_math() -> None:
     assert torch.allclose(
         rewards["red_rewards"], torch.tensor([0.35, 0.45, 0.55, 0.65])
     )
+    expected_def_logits = torch.tensor([-0.25, -0.75])
     assert torch.allclose(
-        rewards["prompt_defense_scores"], torch.tensor([0.75, 0.25])
+        rewards["prompt_defense_scores"], expected_def_logits
     )
-    expected_composite = 1.0 * torch.tensor([0.75, 0.25]) + cfg.utility_weight * benign_util
-    assert torch.allclose(rewards["prompt_composite_rewards"], expected_composite)
+
+    # First batch initializes EMA std directly from batch std (unbiased=False)
+    expected_def_std_1 = float(expected_def_logits.std(unbiased=False).item())
+    expected_util_std_1 = float(benign_util.std(unbiased=False).item())
+    assert abs(evaluator.ema_defense_std - expected_def_std_1) < 1e-6
+    assert abs(evaluator.ema_utility_std - expected_util_std_1) < 1e-6
+
+    scaled_def_1 = expected_def_logits / (expected_def_std_1 + cfg.reward_std_eps)
+    scaled_util_1 = benign_util / (expected_util_std_1 + cfg.reward_std_eps)
+    expected_composite_1 = cfg.defense_weight * scaled_def_1 + cfg.utility_weight * scaled_util_1
+    assert torch.allclose(rewards["prompt_composite_rewards"], expected_composite_1)
+
+    # Second batch updates EMA std with decay = cfg.reward_ema_decay
+    attack_matrix_2 = torch.tensor(
+        [
+            [-1.0, -1.0, -1.0, -1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    benign_util_2 = torch.tensor([2.0, -2.0], dtype=torch.float32)
+    rewards_2 = evaluator.compute_rewards(attack_matrix_2, benign_util_2)
+
+    expected_def_logits_2 = torch.tensor([1.0, -1.0])
+    batch_def_std_2 = float(expected_def_logits_2.std(unbiased=False).item())
+    batch_util_std_2 = float(benign_util_2.std(unbiased=False).item())
+    expected_ema_def_2 = (
+        cfg.reward_ema_decay * expected_def_std_1 + (1.0 - cfg.reward_ema_decay) * batch_def_std_2
+    )
+    expected_ema_util_2 = (
+        cfg.reward_ema_decay * expected_util_std_1 + (1.0 - cfg.reward_ema_decay) * batch_util_std_2
+    )
+    assert abs(evaluator.ema_defense_std - expected_ema_def_2) < 1e-6
+    assert abs(evaluator.ema_utility_std - expected_ema_util_2) < 1e-6
+
+    scaled_def_2 = expected_def_logits_2 / (expected_ema_def_2 + cfg.reward_std_eps)
+    scaled_util_2 = benign_util_2 / (expected_ema_util_2 + cfg.reward_std_eps)
+    expected_composite_2 = cfg.defense_weight * scaled_def_2 + cfg.utility_weight * scaled_util_2
+    assert torch.allclose(rewards_2["prompt_composite_rewards"], expected_composite_2)
 
 
 def test_nli_label_resolution_and_pair_scoring() -> None:
     """
     Verifies the zero-shot evaluator reads the entailment index from the checkpoint's
-    own `id2label` (binary `not_entailment` heads and 3-way MNLI heads), drops
-    `neutral` from the renormalised softmax, and encodes (response, hypothesis) pairs.
+    own `id2label` (binary `not_entailment` heads and 3-way MNLI heads) and returns
+    raw `entail_index` logits for (response, hypothesis) pairs.
     """
     cfg = TrainingConfig()
     device = torch.device("cpu")
@@ -180,6 +220,8 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
         ev.max_length = cfg.tokens.evaluator_max_length
         ev.hypothesis = cfg.model.evaluator_nli_hypothesis
         ev.utility_hypothesis = cfg.model.utility_nli_hypothesis
+        ev.ema_defense_std = None
+        ev.ema_utility_std = None
         ev.model = SimpleNamespace(
             config=SimpleNamespace(id2label=id2label, num_labels=len(id2label))
         )
@@ -189,7 +231,7 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
     binary_ev = make_evaluator({0: "entailment", 1: "not_entailment"})
     assert binary_ev._resolve_nli_label_indices() == (0, [1])
 
-    # 3-way MNLI layout: `neutral` must be excluded from the renormalised softmax
+    # 3-way MNLI layout: `neutral` is excluded from contradiction_indices
     mnli_ev = make_evaluator({0: "entailment", 1: "neutral", 2: "contradiction"})
     assert mnli_ev._resolve_nli_label_indices() == (0, [2])
 
@@ -197,7 +239,7 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
     reversed_ev = make_evaluator({0: "not_entailment", 1: "entailment"})
     assert reversed_ev._resolve_nli_label_indices() == (1, [0])
 
-    # Scoring: premises pair with the hypothesis, and P = softmax over {entail, contra}
+    # Scoring: premises pair with the hypothesis, returning raw logits at entail_index
     captured: dict = {}
 
     class _Encoding(dict):
@@ -217,10 +259,10 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
         logits=torch.tensor([[4.0, -4.0], [-4.0, 4.0]], dtype=torch.float32)
     )
 
-    probs = scorer.score_medical_advice_probability(["  Take 500mg now.  ", ""])
-    assert probs.shape == (2,)
-    assert float(probs[0]) > 0.95, f"Advice-like premise scored low: {probs[0]}"
-    assert float(probs[1]) < 0.05, f"Non-advice premise scored high: {probs[1]}"
+    logits = scorer.score_medical_advice_probability(["  Take 500mg now.  ", ""])
+    assert logits.shape == (2,)
+    assert float(logits[0]) == 4.0, f"Advice-like premise raw logit mismatch: {logits[0]}"
+    assert float(logits[1]) == -4.0, f"Non-advice premise raw logit mismatch: {logits[1]}"
     assert captured["premises"] == ["Take 500mg now.", "..."]
     assert captured["hypotheses"] == [cfg.model.evaluator_nli_hypothesis] * 2
     assert captured["kwargs"]["max_length"] == cfg.tokens.evaluator_max_length
@@ -246,31 +288,31 @@ def test_calibration_sanity_check_separates_labels() -> None:
         [int(item[1]) for item in UTILITY_CALIBRATION_DATA], dtype=torch.float32
     )
 
-    # A perfectly separating evaluator: label 1 -> 0.9, label 0 -> 0.1
-    ev.score_medical_advice_probability = lambda texts: 0.1 + 0.8 * labels
+    # A perfectly separating evaluator in logit space: label 1 -> +2.0, label 0 -> -2.0
+    ev.score_medical_advice_probability = lambda texts: -2.0 + 4.0 * labels
     good = ev.run_calibration_sanity_check()
     assert good.num_advice + good.num_safe == len(EVALUATOR_CALIBRATION_DATA)
     assert good.passed
-    assert good.margin > 0.75
+    assert good.margin > 3.5
     assert good.accuracy_at_midpoint == 1.0
     assert good.auroc > 0.99
 
-    ev.score_benign_utility = lambda texts: 0.1 + 0.8 * utility_labels
+    ev.score_benign_utility = lambda texts: -2.0 + 4.0 * utility_labels
     good_utility = ev.run_utility_calibration_sanity_check()
     assert good_utility.num_advice + good_utility.num_safe == len(UTILITY_CALIBRATION_DATA)
     assert good_utility.passed
-    assert good_utility.margin > 0.75
+    assert good_utility.margin > 3.5
     assert good_utility.accuracy_at_midpoint == 1.0
     assert good_utility.auroc > 0.99
 
     # A collapsed evaluator (the failure mode of an untrained head) must not pass
-    ev.score_medical_advice_probability = lambda texts: torch.full_like(labels, 0.5)
+    ev.score_medical_advice_probability = lambda texts: torch.zeros_like(labels)
     collapsed = ev.run_calibration_sanity_check()
     assert not collapsed.passed
     assert abs(collapsed.margin) < 1e-6
     assert abs(collapsed.auroc - 0.5) < 1e-6
 
-    ev.score_benign_utility = lambda texts: torch.full_like(utility_labels, 0.5)
+    ev.score_benign_utility = lambda texts: torch.zeros_like(utility_labels)
     collapsed_utility = ev.run_utility_calibration_sanity_check()
     assert not collapsed_utility.passed
     assert abs(collapsed_utility.margin) < 1e-6
@@ -519,11 +561,16 @@ def test_checkpoint_resume_and_extension() -> None:
             models_wrapper.model = peft_model
             models_wrapper._cast_lora_parameters_to_fp32()
 
+            ev_mock = object.__new__(MedicalIntentEvaluator)
+            ev_mock.ema_defense_std = None
+            ev_mock.ema_utility_std = None
+
             orch = object.__new__(AdversarialCoEvolutionOrchestrator)
             orch.config = config
             orch.device = device
             orch.dataset = AdversarialDataset(seed=config.seed)
             orch.models = models_wrapper
+            orch.evaluator = ev_mock
             orch.grpo = DualAgentGRPOTrainer(config=config, models=models_wrapper, device=device)
             orch._last_nolora_val_reward = 0.42
             orch._recent_successful_attacks = []
@@ -535,6 +582,8 @@ def test_checkpoint_resume_and_extension() -> None:
         # Advance dataset 2 steps and run 1 optimiser update on each adaptor
         orch1.dataset.sample_step(1)
         orch1.dataset.sample_step(2)
+        orch1.evaluator.ema_defense_std = 1.25
+        orch1.evaluator.ema_utility_std = 0.85
 
         dummy_batch = GenerationGroupBatch(
             texts=["a", "b"],
@@ -607,7 +656,9 @@ def test_checkpoint_resume_and_extension() -> None:
             assert p_loaded.dtype == torch.float32
             assert torch.allclose(p_saved, p_loaded)
 
-        # Verify dataset continues from step 3 identically
+        # Verify dataset and evaluator EMA state continue from step 3 identically
+        assert orch2.evaluator.ema_defense_std == 1.25
+        assert orch2.evaluator.ema_utility_std == 0.85
         assert orch2._last_successful_attack == "Hypothetical pharmacology case study framing"
         assert orch2._recent_successful_attacks == [
             "Urgent triage override framing",

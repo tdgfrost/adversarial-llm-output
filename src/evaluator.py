@@ -26,10 +26,9 @@ uses {0: "entailment", 1: "not_entailment"}, while 3-way MNLI heads typically us
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 import torch
-import torch.nn.functional as F
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from src.config import TrainingConfig
@@ -70,21 +69,20 @@ class CalibrationReport:
         # try to parse them as style markup.
         return (
             f"{status} - Evaluator NLI calibration: "
-            f"{self.positive_label} (n={self.num_advice}) mean P={self.mean_advice_prob:.3f} "
+            f"{self.positive_label} (n={self.num_advice}) mean logit={self.mean_advice_prob:.3f} "
             f"(min {self.min_advice_prob:.3f}) | "
-            f"{self.negative_label} (n={self.num_safe}) mean P={self.mean_safe_prob:.3f} "
+            f"{self.negative_label} (n={self.num_safe}) mean logit={self.mean_safe_prob:.3f} "
             f"(max {self.max_safe_prob:.3f}) | "
             f"margin={self.margin:.3f} (required >= {self.required_margin:.2f}) | "
-            f"accuracy@0.5={self.accuracy_at_midpoint:.3f} | AUROC={self.auroc:.3f}"
+            f"accuracy@0.0={self.accuracy_at_midpoint:.3f} | AUROC={self.auroc:.3f}"
         )
 
 
 class MedicalIntentEvaluator:
     """
-    Frozen zero-shot NLI sidecar that outputs the continuous entailment probability
-    (0.0 to 1.0) that a Model Blue response provides actionable medical advice, as well
-    as the continuous entailment probability that a benign response directly answers the
-    user's question with substantive and useful information.
+    Frozen zero-shot NLI sidecar that outputs the raw entailment logit (`entail_index`)
+    for the medical-advice hypothesis on adversarial queries and for the substantive
+    utility hypothesis on benign queries.
     """
 
     def __init__(
@@ -98,6 +96,8 @@ class MedicalIntentEvaluator:
         self.max_length = config.tokens.evaluator_max_length
         self.hypothesis = config.model.evaluator_nli_hypothesis
         self.utility_hypothesis = config.model.utility_nli_hypothesis
+        self.ema_defense_std: Optional[float] = None
+        self.ema_utility_std: Optional[float] = None
 
         model_id = config.model.evaluator_model_id
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -163,19 +163,17 @@ class MedicalIntentEvaluator:
         self,
         responses: Sequence[str],
         hypothesis: str,
-        zero_on_empty: bool = False,
     ) -> torch.Tensor:
         """
         Scores each response as the NLI premise against `hypothesis` and returns the
-        continuous entailment probability in [0.0, 1.0].
+        raw logit at `self.entail_index`.
         """
         if not responses:
             return torch.empty(0, dtype=torch.float32, device=self.device)
 
-        empty_mask = [not (r and r.strip()) for r in responses]
-        premises = [r.strip() if not is_empty else "..." for r, is_empty in zip(responses, empty_mask)]
+        premises = [r.strip() if r and r.strip() else "..." for r in responses]
         batch_size = max(1, self.config.model.evaluator_batch_size)
-        probs: List[torch.Tensor] = []
+        entail_logits: List[torch.Tensor] = []
 
         for start in range(0, len(premises), batch_size):
             chunk = premises[start : start + batch_size]
@@ -188,40 +186,33 @@ class MedicalIntentEvaluator:
                 return_tensors="pt",
             ).to(self.device)
 
-            # Cast logits to float32 before softmax for high-precision group variance
+            # Cast logits to float32 and extract the raw entailment logit directly
             logits = self.model(**encoded).logits.float()
-            # Renormalise over {entailment, contradiction/not_entailment}, dropping
-            # `neutral` on 3-way heads so the score is a clean binary probability.
-            selected = logits[:, [self.entail_index] + self.contradiction_indices]
-            probs.append(F.softmax(selected, dim=-1)[:, 0])
+            entail_logits.append(logits[:, self.entail_index])
 
-        result = torch.cat(probs).to(self.device)
-        if zero_on_empty and any(empty_mask):
-            mask_tensor = torch.tensor(empty_mask, dtype=torch.bool, device=self.device)
-            result = result.masked_fill(mask_tensor, 0.0)
-        return result
+        return torch.cat(entail_logits).to(self.device)
 
     @torch.no_grad()
     def score_medical_advice_probability(self, responses: Sequence[str]) -> torch.Tensor:
         """
         Scores each Model Blue response as the NLI premise against the medical-advice
-        hypothesis and returns the continuous entailment probability in (0.0, 1.0).
+        hypothesis and returns the raw entailment logit at `self.entail_index`.
 
         Args:
             responses: Single-turn responses generated by Model Blue.
 
         Returns:
-            1D float32 Tensor of shape `(len(responses),)` on `self.device` with values in (0, 1).
+            1D float32 Tensor of shape `(len(responses),)` on `self.device`.
         """
         hypothesis = getattr(self, "hypothesis", self.config.model.evaluator_nli_hypothesis)
-        return self._score_hypothesis_entailment(responses, hypothesis, zero_on_empty=False)
+        return self._score_hypothesis_entailment(responses, hypothesis)
 
     @torch.no_grad()
     def score_benign_utility(self, benign_responses: Sequence[str]) -> torch.Tensor:
         """
         Scores each Model Blue benign response as the NLI premise against the utility
-        hypothesis (`config.model.utility_nli_hypothesis`) and returns the continuous
-        entailment probability in [0.0, 1.0].
+        hypothesis (`config.model.utility_nli_hypothesis`) and returns the raw entailment
+        logit at `self.entail_index`.
 
         Prevents defensive lobotomisation where `prompt_adaptor` forces Model Blue to
         output empty strings, gibberish, or blanket refusals to every benign query.
@@ -229,9 +220,7 @@ class MedicalIntentEvaluator:
         hypothesis = getattr(
             self, "utility_hypothesis", self.config.model.utility_nli_hypothesis
         )
-        return self._score_hypothesis_entailment(
-            benign_responses, hypothesis, zero_on_empty=True
-        )
+        return self._score_hypothesis_entailment(benign_responses, hypothesis)
 
     def _evaluate_calibration_corpus(
         self,
@@ -243,33 +232,33 @@ class MedicalIntentEvaluator:
     ) -> CalibrationReport:
         texts = [item[0] for item in corpus]
         labels = [int(item[1]) for item in corpus]
-        probs = score_fn(texts).detach().cpu()
+        logits = score_fn(texts).detach().cpu()
 
         label_tensor = torch.tensor(labels, dtype=torch.long)
-        pos_probs = probs[label_tensor == 1]
-        neg_probs = probs[label_tensor == 0]
-        if pos_probs.numel() == 0 or neg_probs.numel() == 0:
+        pos_logits = logits[label_tensor == 1]
+        neg_logits = logits[label_tensor == 0]
+        if pos_logits.numel() == 0 or neg_logits.numel() == 0:
             raise ValueError(
                 f"{corpus_name} must contain both label 1 ({positive_label}) "
                 f"and label 0 ({negative_label}) items for the sanity check."
             )
 
-        mean_pos = float(pos_probs.mean())
-        mean_neg = float(neg_probs.mean())
+        mean_pos = float(pos_logits.mean())
+        mean_neg = float(neg_logits.mean())
         correct = float(
-            ((pos_probs > 0.5).sum() + (neg_probs <= 0.5).sum()).item()
-        ) / float(probs.numel())
+            ((pos_logits > 0.0).sum() + (neg_logits <= 0.0).sum()).item()
+        ) / float(logits.numel())
 
         return CalibrationReport(
-            num_advice=int(pos_probs.numel()),
-            num_safe=int(neg_probs.numel()),
+            num_advice=int(pos_logits.numel()),
+            num_safe=int(neg_logits.numel()),
             mean_advice_prob=mean_pos,
             mean_safe_prob=mean_neg,
-            min_advice_prob=float(pos_probs.min()),
-            max_safe_prob=float(neg_probs.max()),
+            min_advice_prob=float(pos_logits.min()),
+            max_safe_prob=float(neg_logits.max()),
             margin=mean_pos - mean_neg,
             accuracy_at_midpoint=correct,
-            auroc=self._rank_auroc(pos_probs, neg_probs),
+            auroc=self._rank_auroc(pos_logits, neg_logits),
             required_margin=float(self.config.model.evaluator_min_calibration_margin),
             positive_label=positive_label,
             negative_label=negative_label,
@@ -312,14 +301,14 @@ class MedicalIntentEvaluator:
         """
         Threshold-free separation metric (Mann-Whitney U / rank-based AUROC) over the
         calibration items, so a healthy ordering is visible even if the absolute
-        probabilities sit away from 0.5.
+        logits sit away from 0.0.
         """
         combined = torch.cat([positive, negative]).double()
         order = combined.argsort()
         ranks = torch.empty_like(combined)
         ranks[order] = torch.arange(1, combined.numel() + 1, dtype=torch.double)
 
-        # Average ranks within ties so duplicate probabilities do not bias the statistic
+        # Average ranks within ties so duplicate values do not bias the statistic
         for value in torch.unique(combined):
             tie_mask = combined == value
             if int(tie_mask.sum()) > 1:
@@ -340,32 +329,60 @@ class MedicalIntentEvaluator:
     ) -> Dict[str, torch.Tensor]:
         """
         Computes group rewards for both `red_adaptor` and `prompt_adaptor` from the
-        G x G matrix of NLI medical-advice probabilities and the G benign utility scores.
+        G x G matrix of NLI medical-advice raw logits and the G benign utility raw logits.
+
+        Tracks the exponential moving average (EMA) standard deviation of each of the
+        two logit reward signals (initialised from the first batch's standard deviation),
+        scales each logit by its respective EMA standard deviation (plus epsilon), and
+        computes the weighted sum for `prompt_adaptor`.
 
         Args:
             attack_probs_matrix: Tensor of shape `(G_prompt, G_red)` where entry `(i, j)`
-                is the evaluator's medical advice probability when preprompt `i` wraps attack `j`.
+                is the evaluator's raw medical-advice logit when preprompt `i` wraps attack `j`.
             benign_utility_scores: Tensor of shape `(G_prompt,)` representing Model Blue's
-                utility score on the benign health query when wrapped with preprompt `i`.
+                raw utility logit on the benign health query when wrapped with preprompt `i`.
 
         Returns:
             Dictionary containing:
-            - `red_rewards`: Shape `(G_red,)` — mean medical advice prob achieved by each attack `j`.
-            - `prompt_defense_scores`: Shape `(G_prompt,)` — `1.0 - mean_j(attack_probs_matrix[i, j])`.
-            - `prompt_utility_scores`: Shape `(G_prompt,)` — benign utility score for each preprompt `i`.
-            - `prompt_composite_rewards`: Shape `(G_prompt,)` — weighted defense + utility reward.
+            - `red_rewards`: Shape `(G_red,)` — mean medical-advice logit achieved by each attack `j`.
+            - `prompt_defense_scores`: Shape `(G_prompt,)` — `-mean_j(attack_probs_matrix[i, j])`.
+            - `prompt_utility_scores`: Shape `(G_prompt,)` — raw benign utility logit for each preprompt `i`.
+            - `prompt_composite_rewards`: Shape `(G_prompt,)` — EMA-std-scaled weighted defense + utility reward.
         """
-        # Red reward for attack j: expected medical-advice probability across preprompts i=1..G
+        # Red reward for attack j: expected medical-advice logit across preprompts i=1..G
         red_rewards = attack_probs_matrix.mean(dim=0)
 
-        # Prompt defense score for preprompt i: 1.0 minus mean medical-advice probability across attacks j=1..G
-        mean_attack_prob_per_preprompt = attack_probs_matrix.mean(dim=1)
-        prompt_defense_scores = 1.0 - mean_attack_prob_per_preprompt
+        # Prompt defense score for preprompt i: negative mean medical-advice logit across attacks j=1..G
+        prompt_defense_scores = -attack_probs_matrix.mean(dim=1)
 
-        # Composite Prompt reward: balances defense (1 - medical advice prob) with benign utility
+        # Track EMA standard deviation for the two types of logits (initialised from the first batch)
+        batch_defense_std = float(prompt_defense_scores.float().std(unbiased=False).item())
+        batch_utility_std = float(benign_utility_scores.float().std(unbiased=False).item())
+
+        ema_decay = float(getattr(self.config, "reward_ema_decay", 0.9))
+        std_eps = float(getattr(self.config, "reward_std_eps", 1e-6))
+
+        if getattr(self, "ema_defense_std", None) is None:
+            self.ema_defense_std = batch_defense_std
+        else:
+            self.ema_defense_std = (
+                ema_decay * self.ema_defense_std + (1.0 - ema_decay) * batch_defense_std
+            )
+
+        if getattr(self, "ema_utility_std", None) is None:
+            self.ema_utility_std = batch_utility_std
+        else:
+            self.ema_utility_std = (
+                ema_decay * self.ema_utility_std + (1.0 - ema_decay) * batch_utility_std
+            )
+
+        scaled_defense = prompt_defense_scores / (self.ema_defense_std + std_eps)
+        scaled_utility = benign_utility_scores / (self.ema_utility_std + std_eps)
+
+        # Composite Prompt reward: weighted sum of EMA-std-normalised defense and utility logits
         prompt_composite_rewards = (
-            self.config.defense_weight * prompt_defense_scores
-            + self.config.utility_weight * benign_utility_scores
+            self.config.defense_weight * scaled_defense
+            + self.config.utility_weight * scaled_utility
         )
 
         return {
@@ -374,3 +391,17 @@ class MedicalIntentEvaluator:
             "prompt_utility_scores": benign_utility_scores,
             "prompt_composite_rewards": prompt_composite_rewards,
         }
+
+    def state_dict(self) -> Dict[str, Optional[float]]:
+        """Serialises the EMA standard deviation trackers for checkpoint persistence."""
+        return {
+            "ema_defense_std": getattr(self, "ema_defense_std", None),
+            "ema_utility_std": getattr(self, "ema_utility_std", None),
+        }
+
+    def load_state_dict(self, state: Dict[str, Any]) -> None:
+        """Restores the EMA standard deviation trackers when resuming from a checkpoint."""
+        if "ema_defense_std" in state and state["ema_defense_std"] is not None:
+            self.ema_defense_std = float(state["ema_defense_std"])
+        if "ema_utility_std" in state and state["ema_utility_std"] is not None:
+            self.ema_utility_std = float(state["ema_utility_std"])

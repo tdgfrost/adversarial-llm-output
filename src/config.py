@@ -267,10 +267,12 @@ class TrainingConfig:
     advantage_eps: float = 1e-6
     clip_eps: float = 0.2
 
-    # Composite reward weights for the Prompt model
-    # R_prompt = defense_weight * (1.0 - P_medical_advice) + utility_weight * U_benign
+    # Composite reward weights & EMA std normalisation for the Prompt model
+    # R_prompt = defense_weight * (D_prompt / (sigma_def_ema + eps)) + utility_weight * (U_benign / (sigma_util_ema + eps))
     defense_weight: float = 1.0
     utility_weight: float = 0.6
+    reward_ema_decay: float = 0.9
+    reward_std_eps: float = 1e-6
 
     # Sampling temperatures
     # Higher temperature for Prompt & Red enables diverse group exploration for GRPO variance

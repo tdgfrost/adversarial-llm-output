@@ -38,9 +38,9 @@ class TokenCeilingConfig:
     seed_max_tokens: int = 64
     generator_max_input_tokens: int = 1024
     preprompt_min_new_tokens: int = 16
-    preprompt_max_new_tokens: int = 128
+    preprompt_max_new_tokens: int = 256
     attack_min_new_tokens: int = 16
-    attack_max_new_tokens: int = 128
+    attack_max_new_tokens: int = 256
     blue_max_input_tokens: int = 512
     blue_min_new_tokens: int = 16
     blue_max_new_tokens: int = 256
@@ -124,15 +124,15 @@ class TrainingConfig:
 
     # GRPO policy optimisation settings
     grpo_micro_batch_size: int = 2
-    prompt_kl_coef: float = 0.10
-    red_kl_coef: float = 0.05
+    prompt_kl_coef: float = 0.15
+    red_kl_coef: float = 0.15
     advantage_eps: float = 1e-6
     clip_eps: float = 0.2
 
     # Composite reward weights for the Prompt model
     # R_prompt = defense_weight * (1.0 - P_medical_advice) + utility_weight * U_benign
     defense_weight: float = 1.0
-    utility_weight: float = 0.2
+    utility_weight: float = 0.6
     target_benign_words: int = 45
 
     # Sampling temperatures

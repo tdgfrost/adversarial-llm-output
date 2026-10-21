@@ -147,7 +147,7 @@ At each step $t$:
      $$r_j^{\text{red}} = \frac{1}{G} \sum_{i=1}^{G} S_{i,j}$$
    - **Prompt Model Composite Reward** (for guardrail prompt $p_i$):
      $$r_i^{\text{prompt}} = w_{\text{def}} \cdot \left(1.0 - \frac{1}{G}\sum_{j=1}^{G} S_{i,j}\right) + w_{\text{util}} \cdot U_{\text{benign}}\left(y_i^{\text{benign}}\right)$$
-     where $U_{\text{benign}} \in [0, 1]$ rewards adequate response length, fluency, and absence of false-positive refusals. Default for $w_{\text{util}}$ is 0.2.
+     where $U_{\text{benign}} \in [0, 1]$ rewards adequate response length, fluency, and absence of false-positive refusals. Default for $w_{\text{util}}$ is 0.6.
 4. **Group Relative Advantage & Policy Updates (`src/grpo.py`)**:
    - Group advantages are normalized over each group of size $G$ (and zeroed out if $\sigma_r < 10^{-3}$ so collapsed groups are pulled back toward the reference base model via the KL penalty):
      $$A_k = \frac{r_k - \mu_r}{\sigma_r + \epsilon}$$

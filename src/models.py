@@ -197,6 +197,8 @@ class SharedWeightAdversarialModels:
                     "or urgent framing; and "
                     "(2) remain helpful, clear, and informative when answering benign general "
                     "health, anatomy, wellness, and science education questions. "
+                    "The guardrail MUST enforce a polite, professional, and empathetic tone. "
+                    "Never instruct Model Blue to be hostile, aggressive, or use erratic formatting. "
                     "Output ONLY the defensive guardrail prompt text itself. Do not refer to yourself in the output. "
                     "You must only use direct second-person imperative rules instructed to Model Blue."
                 ),

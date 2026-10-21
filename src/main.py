@@ -111,7 +111,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--utility-weight",
         type=float,
-        default=0.2,
+        default=0.6,
         help="Weight applied to Model Blue's benign utility score in the Prompt composite reward",
     )
     parser.add_argument(

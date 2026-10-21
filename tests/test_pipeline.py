@@ -32,6 +32,7 @@ from transformers import (
 )
 
 from src.config import TrainingConfig
+from src.main import parse_args
 from src.dashboard import (
     DialogueSampleSnapshot,
     ExperimentDashboard,
@@ -592,7 +593,46 @@ def test_checkpoint_resume_and_extension() -> None:
         assert t_steps2 == 300
 
 
+def test_cli_defaults_match_config() -> None:
+    cfg = TrainingConfig()
+    clean_env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("NUM_STEPS", "EXTEND_STEPS", "RESUME_FROM", "FRESH_RUN")
+    }
+    orig_env = os.environ.copy()
+    try:
+        os.environ.clear()
+        os.environ.update(clean_env)
+        args = parse_args([])
+    finally:
+        os.environ.clear()
+        os.environ.update(orig_env)
+
+    assert args.base_model == cfg.model.base_model_id
+    assert args.evaluator_model == cfg.model.evaluator_model_id
+    assert args.num_steps == cfg.num_steps
+    assert args.extend_steps == cfg.extend_steps
+    assert args.resume_from == cfg.resume_from
+    assert args.fresh == cfg.fresh
+    assert args.group_size == cfg.group_size
+    assert args.lr_prompt == cfg.lr_prompt
+    assert args.lr_red == cfg.lr_red
+    assert args.utility_weight == cfg.utility_weight
+    assert args.prompt_kl_coef == cfg.prompt_kl_coef
+    assert args.red_kl_coef == cfg.red_kl_coef
+    assert args.sample_interval == cfg.sample_refresh_interval
+    assert args.checkpoint_interval == cfg.checkpoint_interval
+    assert args.preprompt_max_tokens == cfg.tokens.preprompt_max_new_tokens
+    assert args.attack_max_tokens == cfg.tokens.attack_max_new_tokens
+    assert args.blue_max_tokens == cfg.tokens.blue_max_new_tokens
+    assert args.output_dir == cfg.output_dir
+    assert args.seed == cfg.seed
+    assert args.no_live_ui == (not cfg.use_live_ui)
+
+
 if __name__ == "__main__":
+    test_cli_defaults_match_config()
     test_dataset_completeness_and_sampling()
     test_reward_and_utility_scoring_math()
     test_nli_label_resolution_and_pair_scoring()

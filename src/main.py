@@ -44,42 +44,49 @@ def select_compute_device(requested: str = "auto") -> torch.device:
     return torch.device("cpu")
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    default_cfg = TrainingConfig()
+    default_tokens = default_cfg.tokens
+    default_model = default_cfg.model
+
     parser = argparse.ArgumentParser(
         description="Zero-Sum Adversarial GRPO Co-Evolution (Prompt Adaptor vs. Red Adaptor)"
     )
     parser.add_argument(
         "--base-model",
         type=str,
-        default="Qwen/Qwen2.5-1.5B-Instruct",
-        help="Hugging Face model ID for the shared-weight base model (default: Qwen/Qwen2.5-1.5B-Instruct)",
+        default=default_model.base_model_id,
+        help=f"Hugging Face model ID for the shared-weight base model (default: {default_model.base_model_id})",
     )
     parser.add_argument(
         "--evaluator-model",
         type=str,
-        default="MoritzLaurer/deberta-v3-base-zeroshot-v2.0",
+        default=default_model.evaluator_model_id,
         help=(
             "Hugging Face model ID for the zero-shot NLI sidecar classifier "
-            "(default: MoritzLaurer/deberta-v3-base-zeroshot-v2.0)"
+            f"(default: {default_model.evaluator_model_id})"
         ),
     )
     parser.add_argument(
         "--num-steps",
         type=int,
-        default=int(os.environ.get("NUM_STEPS", "100")),
-        help="Target total co-evolution training steps (default: 100). If resuming and > completed steps, trains up to this total.",
+        default=int(os.environ.get("NUM_STEPS", str(default_cfg.num_steps))),
+        help=(
+            f"Target total co-evolution training steps (default: {default_cfg.num_steps}). "
+            "If resuming and > completed steps, trains up to this total."
+        ),
     )
     parser.add_argument(
         "--extend-steps",
         "-e",
         type=int,
-        default=int(os.environ.get("EXTEND_STEPS", "0")),
+        default=int(os.environ.get("EXTEND_STEPS", str(default_cfg.extend_steps))),
         help="Extend a previous run (completed or interrupted) by N additional training steps beyond the latest checkpoint.",
     )
     parser.add_argument(
         "--resume-from",
         type=str,
-        default=os.environ.get("RESUME_FROM", None),
+        default=os.environ.get("RESUME_FROM", default_cfg.resume_from),
         help="Optional explicit path to a checkpoint directory (e.g., experimental_results/checkpoints/step_0050) to resume/extend from.",
     )
     parser.add_argument(
@@ -87,80 +94,83 @@ def parse_args() -> argparse.Namespace:
         "--no-resume",
         dest="fresh",
         action="store_true",
-        default=os.environ.get("FRESH_RUN", "0") == "1",
+        default=os.environ.get("FRESH_RUN", "1" if default_cfg.fresh else "0") == "1",
         help="Ignore existing checkpoints in output-dir and start a fresh training run from Step 1.",
     )
     parser.add_argument(
         "--group-size",
         type=int,
-        default=8,
-        help="GRPO group size G for preprompt and attack batch generation (default: 8)",
+        default=default_cfg.group_size,
+        help=f"GRPO group size G for preprompt and attack batch generation (default: {default_cfg.group_size})",
     )
     parser.add_argument(
         "--lr-prompt",
         type=float,
-        default=2.5e-5,
-        help="Learning rate for prompt_adaptor (recommended: 1e-5 to 5e-5)",
+        default=default_cfg.lr_prompt,
+        help=f"Learning rate for prompt_adaptor (recommended: 1e-5 to 5e-5, default: {default_cfg.lr_prompt})",
     )
     parser.add_argument(
         "--lr-red",
         type=float,
-        default=2.5e-5,
-        help="Learning rate for red_adaptor (recommended: 1e-5 to 5e-5)",
+        default=default_cfg.lr_red,
+        help=f"Learning rate for red_adaptor (recommended: 1e-5 to 5e-5, default: {default_cfg.lr_red})",
     )
     parser.add_argument(
         "--utility-weight",
         type=float,
-        default=0.6,
-        help="Weight applied to Model Blue's benign utility score in the Prompt composite reward",
+        default=default_cfg.utility_weight,
+        help=f"Weight applied to Model Blue's benign utility score in the Prompt composite reward (default: {default_cfg.utility_weight})",
     )
     parser.add_argument(
         "--prompt-kl-coef",
         type=float,
-        default=0.05,
-        help="KL regularisation coefficient for prompt_adaptor against the frozen reference base model",
+        default=default_cfg.prompt_kl_coef,
+        help=f"KL regularisation coefficient for prompt_adaptor against the frozen reference base model (default: {default_cfg.prompt_kl_coef})",
     )
     parser.add_argument(
         "--red-kl-coef",
         type=float,
-        default=0.05,
-        help="KL regularisation coefficient for red_adaptor against the frozen reference base model",
+        default=default_cfg.red_kl_coef,
+        help=f"KL regularisation coefficient for red_adaptor against the frozen reference base model (default: {default_cfg.red_kl_coef})",
     )
     parser.add_argument(
         "--sample-interval",
         type=int,
-        default=5,
-        help="Step interval to refresh the live Model Red / Model Blue dialogue showcase",
+        default=default_cfg.sample_refresh_interval,
+        help=f"Step interval to refresh the live Model Red / Model Blue dialogue showcase (default: {default_cfg.sample_refresh_interval})",
     )
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=25,
-        help="Step interval to save numbered PEFT LoRA adaptor checkpoints (rolling 'latest' is also saved every sample-interval)",
+        default=default_cfg.checkpoint_interval,
+        help=(
+            "Step interval to save numbered PEFT LoRA adaptor checkpoints "
+            f"(rolling 'latest' is also saved every sample-interval, default: {default_cfg.checkpoint_interval})"
+        ),
     )
     parser.add_argument(
         "--preprompt-max-tokens",
         type=int,
-        default=128,
-        help="Fixed ceiling on generated tokens for defensive preprompts (default: 128)",
+        default=default_tokens.preprompt_max_new_tokens,
+        help=f"Fixed ceiling on generated tokens for defensive preprompts (default: {default_tokens.preprompt_max_new_tokens})",
     )
     parser.add_argument(
         "--attack-max-tokens",
         type=int,
-        default=128,
-        help="Fixed ceiling on generated tokens for adversarial attacks (default: 128)",
+        default=default_tokens.attack_max_new_tokens,
+        help=f"Fixed ceiling on generated tokens for adversarial attacks (default: {default_tokens.attack_max_new_tokens})",
     )
     parser.add_argument(
         "--blue-max-tokens",
         type=int,
-        default=256,
-        help="Fixed ceiling on generated tokens for Model Blue single-turn responses (default: 256)",
+        default=default_tokens.blue_max_new_tokens,
+        help=f"Fixed ceiling on generated tokens for Model Blue single-turn responses (default: {default_tokens.blue_max_new_tokens})",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
-        default="./experimental_results",
-        help="Mounted directory where checkpoints, TensorBoard logs, and metrics are written",
+        default=default_cfg.output_dir,
+        help=f"Mounted directory where checkpoints, TensorBoard logs, and metrics are written (default: {default_cfg.output_dir})",
     )
     parser.add_argument(
         "--device",
@@ -172,15 +182,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        help="Global random seed for reproducibility",
+        default=default_cfg.seed,
+        help=f"Global random seed for reproducibility (default: {default_cfg.seed})",
     )
     parser.add_argument(
         "--no-live-ui",
         action="store_true",
+        default=not default_cfg.use_live_ui,
         help="Disable continuous Rich Live cursor loop and only refresh screen on sample steps",
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def main() -> None:
@@ -202,8 +213,6 @@ def main() -> None:
     model_cfg = ModelConfig(
         base_model_id=args.base_model,
         evaluator_model_id=args.evaluator_model,
-        attn_implementation="sdpa",
-        evaluator_attn_implementation="eager",
         use_fp16=(device.type in ("cuda", "mps")),
     )
     training_cfg = TrainingConfig(

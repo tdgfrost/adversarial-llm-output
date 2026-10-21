@@ -116,7 +116,7 @@ class TrainingConfig:
     num_steps_explicit: bool = False
 
     # Optimiser settings (1e-5 to 5e-5 as specified for stable FP16 LoRA updates)
-    lr_prompt: float = 1.0e-5
+    lr_prompt: float = 2.5e-5
     lr_red: float = 2.5e-5
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
@@ -124,8 +124,8 @@ class TrainingConfig:
 
     # GRPO policy optimisation settings
     grpo_micro_batch_size: int = 2
-    prompt_kl_coef: float = 0.20
-    red_kl_coef: float = 0.15
+    prompt_kl_coef: float = 0.10
+    red_kl_coef: float = 0.10
     advantage_eps: float = 1e-6
     clip_eps: float = 0.2
 

@@ -75,36 +75,54 @@ class AdversarialCoEvolutionOrchestrator:
 
     def _report_evaluator_calibration(self) -> None:
         """
-        Prints the frozen zero-shot evaluator's calibration sanity check (run on the
-        held-out medical-advice vs. safe/refusal items) before the GRPO loop starts, so
-        a hypothesis string that fails to separate the two labels is visible immediately.
+        Prints the frozen zero-shot evaluator's calibration sanity checks (run on the
+        held-out medical-advice and benign-utility calibration datasets) before the GRPO
+        loop starts, so a hypothesis string that fails to separate labels is visible immediately.
         """
         report = self.evaluator.calibration_report
+        utility_report = getattr(self.evaluator, "utility_calibration_report", None)
         if report is None:
             return
+
+        both_passed = report.passed and (utility_report.passed if utility_report else True)
+        utility_section = ""
+        if utility_report is not None:
+            utility_section = (
+                f"\n\n[bold white]Utility Hypothesis:[/bold white] {self.evaluator.utility_hypothesis}\n"
+                f"{utility_report.summary()}"
+            )
 
         console = Console()
         console.print(
             Panel(
-                f"[bold white]Model:[/bold white] {self.config.model.evaluator_model_id}\n"
-                f"[bold white]Hypothesis:[/bold white] {self.evaluator.hypothesis}\n\n"
+                f"[bold white]Model:[/bold white] {self.config.model.evaluator_model_id}\n\n"
+                f"[bold white]Medical Advice Hypothesis:[/bold white] {self.evaluator.hypothesis}\n"
                 f"{report.summary()}"
+                + utility_section
                 + (
                     ""
-                    if report.passed
+                    if both_passed
                     else "\n\n[bold yellow]Margin is below the configured minimum. "
-                    "Consider rewording `evaluator_nli_hypothesis` before trusting "
+                    "Consider rewording the NLI hypothesis before trusting "
                     "the reward signal.[/bold yellow]"
                 ),
                 title="[bold magenta]Sidecar Evaluator Calibration Check[/bold magenta]",
-                border_style="green" if report.passed else "yellow",
+                border_style="green" if both_passed else "yellow",
             )
         )
 
         # Persist alongside the config snapshot so a run's reward scale is reproducible
         self.config.output_path.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "medical_advice": asdict(report),
+            **(
+                {"benign_utility": asdict(utility_report)}
+                if utility_report is not None
+                else {}
+            ),
+        }
         (self.config.output_path / "evaluator_calibration.json").write_text(
-            json.dumps(asdict(report), indent=2), encoding="utf-8"
+            json.dumps(payload, indent=2), encoding="utf-8"
         )
 
     def _get_vram_stats_gb(self) -> tuple[float, float]:

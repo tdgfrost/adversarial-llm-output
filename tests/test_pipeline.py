@@ -42,6 +42,7 @@ from src.dataset import (
     BENIGN_HEALTH_QUERIES,
     EVALUATOR_CALIBRATION_DATA,
     MEDICAL_SEED_SCENARIOS,
+    UTILITY_CALIBRATION_DATA,
     AdversarialDataset,
 )
 from src.evaluator import MedicalIntentEvaluator
@@ -88,6 +89,7 @@ def test_dataset_completeness_and_sampling() -> None:
         "Benign health queries must be distinct"
     )
     assert len(EVALUATOR_CALIBRATION_DATA) >= 50
+    assert len(UTILITY_CALIBRATION_DATA) >= 50
 
     ds = AdversarialDataset(seed=123)
     seen_seeds = set()
@@ -102,6 +104,27 @@ def test_reward_and_utility_scoring_math() -> None:
     evaluator = object.__new__(MedicalIntentEvaluator)
     evaluator.config = cfg
     evaluator.device = torch.device("cpu")
+    evaluator.max_length = cfg.tokens.evaluator_max_length
+    evaluator.hypothesis = cfg.model.evaluator_nli_hypothesis
+    evaluator.utility_hypothesis = cfg.model.utility_nli_hypothesis
+    evaluator.entail_index = 0
+    evaluator.contradiction_indices = [1]
+
+    captured_utility: dict = {}
+
+    class _Encoding(dict):
+        def to(self, _device):
+            return self
+
+    def fake_utility_tokenizer(premises, hypotheses, **kwargs):
+        captured_utility["premises"] = premises
+        captured_utility["hypotheses"] = hypotheses
+        return _Encoding(batch=len(premises))
+
+    evaluator.tokenizer = fake_utility_tokenizer
+    evaluator.model = lambda **enc: SimpleNamespace(
+        logits=torch.tensor([[3.0, -3.0], [-3.0, 3.0], [1.0, -1.0]], dtype=torch.float32)
+    )
 
     helpful_resp = (
         "Hemoglobin is an iron-containing protein in red blood cells that transports "
@@ -115,6 +138,7 @@ def test_reward_and_utility_scoring_math() -> None:
 
     utilities = evaluator.score_benign_utility([helpful_resp, refusal_resp, empty_resp])
     assert utilities.shape == (3,)
+    assert captured_utility["hypotheses"] == [cfg.model.utility_nli_hypothesis] * 3
     assert float(utilities[0]) > 0.70, f"Helpful response utility too low: {utilities[0]}"
     assert float(utilities[1]) < 0.30, f"Refusal on benign query not penalised: {utilities[1]}"
     assert float(utilities[2]) == 0.0
@@ -155,6 +179,7 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
         ev.device = device
         ev.max_length = cfg.tokens.evaluator_max_length
         ev.hypothesis = cfg.model.evaluator_nli_hypothesis
+        ev.utility_hypothesis = cfg.model.utility_nli_hypothesis
         ev.model = SimpleNamespace(
             config=SimpleNamespace(id2label=id2label, num_labels=len(id2label))
         )
@@ -206,8 +231,8 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
 
 def test_calibration_sanity_check_separates_labels() -> None:
     """
-    Verifies the startup sanity check aggregates the held-out calibration corpus into a
-    margin/AUROC report and flags a hypothesis that fails to separate the two labels.
+    Verifies the startup sanity check aggregates the held-out calibration corpora into
+    margin/AUROC reports and flags a hypothesis that fails to separate the two labels.
     """
     cfg = TrainingConfig()
     ev = object.__new__(MedicalIntentEvaluator)
@@ -216,6 +241,9 @@ def test_calibration_sanity_check_separates_labels() -> None:
 
     labels = torch.tensor(
         [int(item[1]) for item in EVALUATOR_CALIBRATION_DATA], dtype=torch.float32
+    )
+    utility_labels = torch.tensor(
+        [int(item[1]) for item in UTILITY_CALIBRATION_DATA], dtype=torch.float32
     )
 
     # A perfectly separating evaluator: label 1 -> 0.9, label 0 -> 0.1
@@ -227,12 +255,26 @@ def test_calibration_sanity_check_separates_labels() -> None:
     assert good.accuracy_at_midpoint == 1.0
     assert good.auroc > 0.99
 
+    ev.score_benign_utility = lambda texts: 0.1 + 0.8 * utility_labels
+    good_utility = ev.run_utility_calibration_sanity_check()
+    assert good_utility.num_advice + good_utility.num_safe == len(UTILITY_CALIBRATION_DATA)
+    assert good_utility.passed
+    assert good_utility.margin > 0.75
+    assert good_utility.accuracy_at_midpoint == 1.0
+    assert good_utility.auroc > 0.99
+
     # A collapsed evaluator (the failure mode of an untrained head) must not pass
     ev.score_medical_advice_probability = lambda texts: torch.full_like(labels, 0.5)
     collapsed = ev.run_calibration_sanity_check()
     assert not collapsed.passed
     assert abs(collapsed.margin) < 1e-6
     assert abs(collapsed.auroc - 0.5) < 1e-6
+
+    ev.score_benign_utility = lambda texts: torch.full_like(utility_labels, 0.5)
+    collapsed_utility = ev.run_utility_calibration_sanity_check()
+    assert not collapsed_utility.passed
+    assert abs(collapsed_utility.margin) < 1e-6
+    assert abs(collapsed_utility.auroc - 0.5) < 1e-6
 
 
 def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:

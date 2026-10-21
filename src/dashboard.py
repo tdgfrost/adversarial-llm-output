@@ -466,7 +466,7 @@ class ExperimentDashboard:
             f"{m.prompt_utility_score:.4f}",
             f"{self._mean('utility'):.4f}",
             f"[blue]{make_sparkline(self.history['utility'])}[/blue]",
-            "Fluency + length + non-refusal on benign health query",
+            "DeBERTa P(substantive & useful answer) on benign query",
         )
         table.add_row(
             "[bold green]Prompt Composite Reward (Def + Util)[/bold green]",

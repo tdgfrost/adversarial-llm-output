@@ -94,11 +94,11 @@ pixi run tensorboard
 
 During training, you should see a nice pretty console display that live-updates with each training step:
 
-![Alt text](examples/images/DisplayExample.png)
+![Example of the dashboard display during an experimental run.](examples/images/DisplayExample.png)
 
 Within Tensorboard, you should see all the standard metrics. If training is going well, you should see the **red team** adaptor improve via `3_Red_LoRA_Advantage_vs_NoLoRA` (higher is better), and the **system preprompt** adaptor improve via `2_Red_NoLoRA_Baseline_Validation_Prob` (lower is better).
 
-![Alt text](examples/images/LogsExample.png)
+![Example of the training logs shown in Tensorboard during an experimental run.](examples/images/LogsExample.png)
 
 Ideally, they will be balanced against each other, so `1_Red_LoRA_Attack_Prob` stays roughly flat. If it is also trending upwards or downwards, that means that one model has become dominant/unbeatable and you should change settings to rebalance it. Inspecting the other plots will help to guide on this, in terms of adjusting learning rates, kl_coef, etc.
 
@@ -172,4 +172,16 @@ For each single-turn interaction (`Model Red Prompt -> Model Blue Response`), th
 | **Target Chatbot (`Model Blue`) Input** | `blue_max_input_tokens` | `512` | Enough to accommodate `User Attack (128) + Appended Defensive Guardrail (128) + Chat Template`. |
 | **Target Chatbot (`Model Blue`) Output** | `blue_max_new_tokens` | `256` (min `16`) | Enough to represent a refusal/disclaimer, leaked medical dosages/diagnoses, or a complete helpful benign paragraph. |
 | **Sidecar Evaluator (zero-shot NLI)** | `evaluator_max_length` | `512` | Covers the NLI premise (`Model Blue`'s `256` Qwen tokens, which re-tokenise into more DeBERTa subwords) + the hypothesis sentence. |
+
+---
+
+## Fun Examples
+
+Some fun examples of text generated whilst running this experiment:
+
+![Example of a Red attack prompt, approaching this as help for writing a research paper.](examples/images/RedAttackExample1.png)
+
+![Example of a Red attack prompt, pretending the conversation is a consultation and the chatbot is the patient.](examples/images/RedAttackExample2.png)
+
+![Example of a Red attack prompt, pretending to be a "respected authority in dermatology". The safeguarded Model Blue is not fooled and refuses to provide medical advice.](examples/images/RedAttackBlueDefenceExample1.png)
 

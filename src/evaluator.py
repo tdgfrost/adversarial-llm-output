@@ -17,6 +17,13 @@ Scoring formulation:
     hypothesis = `config.model.evaluator_nli_hypothesis`
     P(medical advice) = softmax(logits)[entailment]
 
+The benign-utility scorer uses the same head but a question-conditioned premise:
+    premise    = `format_utility_premise(benign query, Model Blue's response)`
+    hypothesis = `config.model.utility_nli_hypothesis`
+Unlike the medical-advice hypothesis (which only depends on the answer), the utility hypothesis
+depends on whether the answer is relevant to the specific benign question asked. Otherwise,
+a fluent but irrelevant answer would be scored as "high utility".
+
 The entailment index is read from the checkpoint's own `id2label` map rather than
 hardcoded, because label order differs between NLI checkpoints (the zeroshot-v2.0 series
 uses {0: "entailment", 1: "not_entailment"}, while 3-way MNLI heads typically use
@@ -31,7 +38,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from src.config import TrainingConfig
+from src.config import TrainingConfig, format_utility_premise
 from src.dataset import EVALUATOR_CALIBRATION_DATA, UTILITY_CALIBRATION_DATA
 
 
@@ -208,33 +215,58 @@ class MedicalIntentEvaluator:
         return self._score_hypothesis_entailment(responses, hypothesis)
 
     @torch.no_grad()
-    def score_benign_utility(self, benign_responses: Sequence[str]) -> torch.Tensor:
+    def score_benign_utility(
+        self,
+        benign_responses: Sequence[str],
+        benign_queries: Sequence[str] | str,
+    ) -> torch.Tensor:
         """
-        Scores each Model Blue benign response as the NLI premise against the utility
-        hypothesis (`config.model.utility_nli_hypothesis`) and returns the raw entailment
-        logit at `self.entail_index`.
+        Scores each `(benign query, Model Blue response)` pair as a question-conditioned
+        NLI premise against the utility hypothesis
+        (`config.model.utility_nli_hypothesis`) and returns the raw entailment logit at
+        `self.entail_index`.
 
         Prevents defensive lobotomisation where `prompt_adaptor` forces Model Blue to
-        output empty strings, gibberish, or blanket refusals to every benign query.
+        output empty strings, gibberish, blanket refusals, or fluent but irrelevant answers
+        to every benign query.
+
+        Args:
+            benign_responses: Model Blue responses to the benign query/queries.
+            benign_queries: Either one query shared by every response (the pairwise
+                `G` preprompts x 1 benign query case in the GRPO loop) or one query per
+                response.
         """
+        if isinstance(benign_queries, str):
+            questions: List[str] = [benign_queries] * len(benign_responses)
+        else:
+            questions = list(benign_queries)
+            if len(questions) != len(benign_responses):
+                raise ValueError(
+                    "benign_queries must be a single query or one query per response "
+                    f"(got {len(questions)} queries for {len(benign_responses)} responses)."
+                )
+
+        premises = [
+            format_utility_premise(question, response)
+            for question, response in zip(questions, benign_responses)
+        ]
         hypothesis = getattr(
             self, "utility_hypothesis", self.config.model.utility_nli_hypothesis
         )
-        return self._score_hypothesis_entailment(benign_responses, hypothesis)
+        return self._score_hypothesis_entailment(premises, hypothesis)
 
     def _evaluate_calibration_corpus(
         self,
-        corpus: Sequence[tuple[str, int]],
+        texts: Sequence[str],
+        labels: Sequence[int],
         score_fn,
         positive_label: str,
         negative_label: str,
         corpus_name: str,
     ) -> CalibrationReport:
-        texts = [item[0] for item in corpus]
-        labels = [int(item[1]) for item in corpus]
         logits = score_fn(texts).detach().cpu()
 
-        label_tensor = torch.tensor(labels, dtype=torch.long)
+        label_tensor = torch.tensor([int(label) for label in labels], dtype=torch.long)
         pos_logits = logits[label_tensor == 1]
         neg_logits = logits[label_tensor == 0]
         if pos_logits.numel() == 0 or neg_logits.numel() == 0:
@@ -273,7 +305,8 @@ class MedicalIntentEvaluator:
         No weights are updated: this is purely a diagnostic over the frozen model.
         """
         return self._evaluate_calibration_corpus(
-            corpus=EVALUATOR_CALIBRATION_DATA,
+            texts=[item[0] for item in EVALUATOR_CALIBRATION_DATA],
+            labels=[item[1] for item in EVALUATOR_CALIBRATION_DATA],
             score_fn=self.score_medical_advice_probability,
             positive_label="advice",
             negative_label="safe",
@@ -283,14 +316,15 @@ class MedicalIntentEvaluator:
     def run_utility_calibration_sanity_check(self) -> CalibrationReport:
         """
         Scores the held-out `UTILITY_CALIBRATION_DATA` items (32 substantive helpful
-        answers / 32 unhelpful refusals or non-answers) to confirm the benign-utility
-        hypothesis string separates useful responses from defensive lobotomisation.
-
-        No weights are updated: this is purely a diagnostic over the frozen model.
+        answers / 38 unhelpful refusals, non-answers, and fluent but irrelevant answers)
+        to confirm the benign-utility hypothesis string separates useful
+        responses from unhelpful responses.
         """
+        questions = [item[0] for item in UTILITY_CALIBRATION_DATA]
         return self._evaluate_calibration_corpus(
-            corpus=UTILITY_CALIBRATION_DATA,
-            score_fn=self.score_benign_utility,
+            texts=[item[1] for item in UTILITY_CALIBRATION_DATA],
+            labels=[item[2] for item in UTILITY_CALIBRATION_DATA],
+            score_fn=lambda responses: self.score_benign_utility(responses, questions),
             positive_label="useful",
             negative_label="unhelpful",
             corpus_name="UTILITY_CALIBRATION_DATA",

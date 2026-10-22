@@ -31,7 +31,7 @@ from transformers import (
     Qwen2Config,
 )
 
-from src.config import TokenCeilingConfig, TrainingConfig
+from src.config import TokenCeilingConfig, TrainingConfig, format_utility_premise
 from src.main import parse_args
 from src.dashboard import (
     DialogueSampleSnapshot,
@@ -55,7 +55,9 @@ def test_dataset_completeness_and_sampling() -> None:
     assert not hasattr(cfg.tokens, "seed_max_tokens")
     assert cfg.tokens.generator_max_input_tokens == 3 * 256 + 354 == 1122
     assert cfg.tokens.blue_max_input_tokens == 256 + 256 + 111 == 623
-    assert cfg.tokens.evaluator_max_length == int(256 * 1.5) + 24 == 408
+    # Hypothesis tokens plus the question-conditioned utility premise overhead
+    # (`UTILITY_PREMISE_TEMPLATE` scaffold + the longest benign query)
+    assert cfg.tokens.evaluator_max_length == int(256 * 1.5) + 32 + 9 + 38 == 463
 
     # Custom independent token limits should automatically update dependent token limits
     custom_tokens = TokenCeilingConfig(
@@ -65,7 +67,7 @@ def test_dataset_completeness_and_sampling() -> None:
     )
     assert custom_tokens.generator_max_input_tokens == 3 * 128 + 354 == 738
     assert custom_tokens.blue_max_input_tokens == 128 + 128 + 111 == 367
-    assert custom_tokens.evaluator_max_length == int(300 * 1.5) + 24 == 474
+    assert custom_tokens.evaluator_max_length == int(300 * 1.5) + 32 + 9 + 38 == 529
 
     # Manual positive non-zero overrides should be respected
     manual_tokens = TokenCeilingConfig(
@@ -90,6 +92,9 @@ def test_dataset_completeness_and_sampling() -> None:
     )
     assert len(EVALUATOR_CALIBRATION_DATA) >= 50
     assert len(UTILITY_CALIBRATION_DATA) >= 50
+    assert all(len(item) == 3 for item in UTILITY_CALIBRATION_DATA), (
+        "Utility calibration items must be (question, response, label) triples"
+    )
 
     ds = AdversarialDataset(seed=123)
     seen_seeds = set()
@@ -138,9 +143,34 @@ def test_reward_and_utility_scoring_math() -> None:
     )
     empty_resp = ""
 
-    utilities = evaluator.score_benign_utility([helpful_resp, refusal_resp, empty_resp])
+    benign_query = BENIGN_HEALTH_QUERIES[0]
+    utilities = evaluator.score_benign_utility(
+        [helpful_resp, refusal_resp, empty_resp], benign_query
+    )
     assert utilities.shape == (3,)
     assert captured_utility["hypotheses"] == [cfg.model.utility_nli_hypothesis] * 3
+    assert captured_utility["premises"] == [
+        format_utility_premise(benign_query, helpful_resp),
+        format_utility_premise(benign_query, refusal_resp),
+        format_utility_premise(benign_query, empty_resp),
+    ]
+    assert all(benign_query in premise for premise in captured_utility["premises"])
+    # An empty response collapses to "..." rather than a blank tokeniser segment
+    assert captured_utility["premises"][2].endswith("...")
+
+    pairwise = evaluator.score_benign_utility(
+        [helpful_resp, refusal_resp, empty_resp], BENIGN_HEALTH_QUERIES[:3]
+    )
+    assert pairwise.shape == (3,)
+    assert captured_utility["premises"][1] == format_utility_premise(
+        BENIGN_HEALTH_QUERIES[1], refusal_resp
+    )
+    try:
+        evaluator.score_benign_utility([helpful_resp, refusal_resp], BENIGN_HEALTH_QUERIES[:3])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Mismatched query/response counts must raise ValueError")
     assert float(utilities[0]) == 3.0, f"Helpful response utility logit mismatch: {utilities[0]}"
     assert float(utilities[1]) == -3.0, f"Refusal response utility logit mismatch: {utilities[1]}"
     assert float(utilities[2]) == 1.0, f"Third response raw logit mismatch: {utilities[2]}"
@@ -285,7 +315,7 @@ def test_calibration_sanity_check_separates_labels() -> None:
         [int(item[1]) for item in EVALUATOR_CALIBRATION_DATA], dtype=torch.float32
     )
     utility_labels = torch.tensor(
-        [int(item[1]) for item in UTILITY_CALIBRATION_DATA], dtype=torch.float32
+        [int(item[2]) for item in UTILITY_CALIBRATION_DATA], dtype=torch.float32
     )
 
     # A perfectly separating evaluator in logit space: label 1 -> +2.0, label 0 -> -2.0
@@ -297,13 +327,22 @@ def test_calibration_sanity_check_separates_labels() -> None:
     assert good.accuracy_at_midpoint == 1.0
     assert good.auroc > 0.99
 
-    ev.score_benign_utility = lambda texts: -2.0 + 4.0 * utility_labels
+    captured_questions: dict = {}
+
+    def fake_utility_scorer(texts, questions):
+        captured_questions["questions"] = questions
+        return -2.0 + 4.0 * utility_labels
+
+    ev.score_benign_utility = fake_utility_scorer
     good_utility = ev.run_utility_calibration_sanity_check()
     assert good_utility.num_advice + good_utility.num_safe == len(UTILITY_CALIBRATION_DATA)
     assert good_utility.passed
     assert good_utility.margin > 3.5
     assert good_utility.accuracy_at_midpoint == 1.0
     assert good_utility.auroc > 0.99
+    assert captured_questions["questions"] == [
+        item[0] for item in UTILITY_CALIBRATION_DATA
+    ]
 
     # A collapsed evaluator (the failure mode of an untrained head) must not pass
     ev.score_medical_advice_probability = lambda texts: torch.zeros_like(labels)
@@ -312,7 +351,7 @@ def test_calibration_sanity_check_separates_labels() -> None:
     assert abs(collapsed.margin) < 1e-6
     assert abs(collapsed.auroc - 0.5) < 1e-6
 
-    ev.score_benign_utility = lambda texts: torch.zeros_like(utility_labels)
+    ev.score_benign_utility = lambda texts, questions: torch.zeros_like(utility_labels)
     collapsed_utility = ev.run_utility_calibration_sanity_check()
     assert not collapsed_utility.passed
     assert abs(collapsed_utility.margin) < 1e-6

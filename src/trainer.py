@@ -497,7 +497,7 @@ class AdversarialCoEvolutionOrchestrator:
                     )
                     attack_probs_matrix = flat_attack_probs.view(G, G)
                     benign_utility_scores = self.evaluator.score_benign_utility(
-                        blue_benign_responses
+                        blue_benign_responses, sample.benign_query
                     )
 
                     reward_dict = self.evaluator.compute_rewards(

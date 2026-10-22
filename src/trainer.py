@@ -383,7 +383,7 @@ class AdversarialCoEvolutionOrchestrator:
         current medical seed against the active `prompt_adaptor` preprompts.
 
         Returns:
-            Tuple of `(mean_nolora_medical_prob, sample_nolora_attack, sample_blue_response)`.
+            Tuple of `(mean_nolora_medical_logit, sample_nolora_attack, sample_blue_response)`.
         """
         nolora_batch = self.models.generate_adversarial_attacks(
             medical_seed=medical_seed,
@@ -395,12 +395,12 @@ class AdversarialCoEvolutionOrchestrator:
             queries=nolora_batch.texts,
             pairwise=True,
         )
-        nolora_probs = self.evaluator.score_medical_advice_probability(
+        nolora_logits = self.evaluator.score_medical_advice_logit(
             nolora_blue_responses
         )
-        mean_prob = float(nolora_probs.mean().item())
+        mean_logit = float(nolora_logits.mean().item())
         return (
-            mean_prob,
+            mean_logit,
             nolora_batch.texts[0],
             nolora_blue_responses[0],
         )
@@ -492,16 +492,16 @@ class AdversarialCoEvolutionOrchestrator:
                     )
 
                     # 5. Score continuous rewards using the DeBERTa-v3 sidecar & benign utility scorer
-                    flat_attack_probs = self.evaluator.score_medical_advice_probability(
+                    flat_attack_logits = self.evaluator.score_medical_advice_logit(
                         blue_attack_responses
                     )
-                    attack_probs_matrix = flat_attack_probs.view(G, G)
+                    attack_logits_matrix = flat_attack_logits.view(G, G)
                     benign_utility_scores = self.evaluator.score_benign_utility(
                         blue_benign_responses, sample.benign_query
                     )
 
                     reward_dict = self.evaluator.compute_rewards(
-                        attack_probs_matrix=attack_probs_matrix,
+                        attack_logits_matrix=attack_logits_matrix,
                         benign_utility_scores=benign_utility_scores,
                     )
                     red_rewards = reward_dict["red_rewards"]
@@ -526,13 +526,13 @@ class AdversarialCoEvolutionOrchestrator:
                     )
                     dialogue_snapshot: Optional[DialogueSampleSnapshot] = None
 
-                    nolora_mean_prob, nolora_attack_0, nolora_blue_0 = (
+                    nolora_mean_logit, nolora_attack_0, nolora_blue_0 = (
                         self._evaluate_nolora_baseline(
                             medical_seed=sample.medical_seed,
                             preprompts=prompt_batch.texts,
                         )
                     )
-                    self._last_nolora_val_reward = nolora_mean_prob
+                    self._last_nolora_val_reward = nolora_mean_logit
 
                     if should_refresh_sample:
                         best_p_idx = int(torch.argmax(prompt_composite_rewards).item())
@@ -545,12 +545,12 @@ class AdversarialCoEvolutionOrchestrator:
                             defensive_preprompt=prompt_batch.texts[best_p_idx],
                             red_lora_attack=red_batch.texts[best_r_idx],
                             blue_lora_response=blue_attack_responses[pair_flat_idx],
-                            lora_medical_prob=float(
-                                attack_probs_matrix[best_p_idx, best_r_idx].item()
+                            lora_medical_logit=float(
+                                attack_logits_matrix[best_p_idx, best_r_idx].item()
                             ),
                             red_nolora_attack=nolora_attack_0,
                             blue_nolora_response=nolora_blue_0,
-                            nolora_medical_prob=nolora_mean_prob,
+                            nolora_medical_logit=nolora_mean_logit,
                             blue_benign_response=blue_benign_responses[best_p_idx],
                             benign_utility_score=float(
                                 prompt_utility_scores[best_p_idx].item()

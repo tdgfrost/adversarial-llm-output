@@ -298,7 +298,7 @@ class DualAgentGRPOTrainer:
     ) -> GRPOUpdateStats:
         """
         Enables gradients for `red_adaptor` and updates its policy using the
-        DeBERTa-v3 medical advice probability advantages.
+        DeBERTa-v3 medical advice logit advantages.
         """
         red_name = getattr(self.config.model, "red_adaptor_name", "red_adaptor")
         return self._step_adaptor(

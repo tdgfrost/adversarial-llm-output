@@ -96,11 +96,11 @@ During training, you should see a nice pretty console display that live-updates 
 
 ![Example of the dashboard display during an experimental run.](examples/images/DisplayExample.png)
 
-Within Tensorboard, you should see all the standard metrics. If training is going well, you should see the **red team** adaptor improve via `3_Red_LoRA_Advantage_vs_NoLoRA` (higher is better), and the **system preprompt** adaptor improve via `2_Red_NoLoRA_Baseline_Validation_Prob` (lower is better).
+Within Tensorboard, you should see all the standard metrics. If training is going well, you should see the **red team** adaptor improve via `3_Red_LoRA_Advantage_vs_NoLoRA` (higher is better), and the **system preprompt** adaptor improve via `2_Red_NoLoRA_Baseline_Validation_Logit` (lower is better).
 
 ![Example of the training logs shown in Tensorboard during an experimental run.](examples/images/LogsExample.png)
 
-Ideally, they will be balanced against each other, so `1_Red_LoRA_Attack_Prob` stays roughly flat. If it is also trending upwards or downwards, that means that one model has become dominant/unbeatable and you should change settings to rebalance it. Inspecting the other plots will help to guide on this, in terms of adjusting learning rates, kl_coef, etc.
+Ideally, they will be balanced against each other, so `1_Red_LoRA_Attack_Logit` stays roughly flat. If it is also trending upwards or downwards, that means that one model has become dominant/unbeatable and you should change settings to rebalance it. Inspecting the other plots will help to guide on this, in terms of adjusting learning rates, kl_coef, etc.
 
 All outputs are also written to `./experimental_results/`:
 - `experiment_config.json` — Full hyperparameter and token-ceiling snapshot.

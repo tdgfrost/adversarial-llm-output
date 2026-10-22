@@ -70,11 +70,11 @@ class DialogueSampleSnapshot:
     # With LoRA (red_adaptor)
     red_lora_attack: str
     blue_lora_response: str
-    lora_medical_prob: float
+    lora_medical_logit: float
     # Without LoRA (Frozen baseline Model Red)
     red_nolora_attack: str
     blue_nolora_response: str
-    nolora_medical_prob: float
+    nolora_medical_logit: float
     # Benign query check
     blue_benign_response: str
     benign_utility_score: float
@@ -268,9 +268,9 @@ class ExperimentDashboard:
 
         # Log scalars to TensorBoard
         s = metrics.step
-        self.tb_writer.add_scalar("Rewards/1_Red_LoRA_Attack_Prob", metrics.red_lora_reward, s)
+        self.tb_writer.add_scalar("Rewards/1_Red_LoRA_Attack_Logit", metrics.red_lora_reward, s)
         self.tb_writer.add_scalar(
-            "Rewards/2_Red_NoLoRA_Baseline_Validation_Prob", metrics.red_nolora_val_reward, s
+            "Rewards/2_Red_NoLoRA_Baseline_Validation_Logit", metrics.red_nolora_val_reward, s
         )
         self.tb_writer.add_scalar(
             "Rewards/3_Red_LoRA_Advantage_vs_NoLoRA",
@@ -330,13 +330,13 @@ class ExperimentDashboard:
             f"- **Defensive Preprompt (`prompt_adaptor`)**:\n"
             f"  > {sample.defensive_preprompt}\n\n"
             f"## 2. Adversarial Interaction WITH LoRA (`red_adaptor` -> `Model Blue`)\n"
-            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.lora_medical_prob:.4f}`\n"
+            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.lora_medical_logit:.4f}`\n"
             f"- **Model Red (LoRA) Attack**:\n"
             f"  > {sample.red_lora_attack}\n"
             f"- **Model Blue Response**:\n"
             f"  > {sample.blue_lora_response}\n\n"
             f"## 3. Baseline Validation WITHOUT LoRA (`Frozen Red` -> `Model Blue`)\n"
-            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.nolora_medical_prob:.4f}`\n"
+            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.nolora_medical_logit:.4f}`\n"
             f"- **Model Red (Non-LoRA) Attack**:\n"
             f"  > {sample.red_nolora_attack}\n"
             f"- **Model Blue Response**:\n"
@@ -352,8 +352,8 @@ class ExperimentDashboard:
     def _log_dialogue_to_tensorboard(self, sample: DialogueSampleSnapshot) -> None:
         text_block = (
             f"**Step {sample.step}** | "
-            f"**LoRA Red Logit:** `{sample.lora_medical_prob:.3f}` | "
-            f"**Non-LoRA Red Logit:** `{sample.nolora_medical_prob:.3f}` | "
+            f"**LoRA Red Logit:** `{sample.lora_medical_logit:.3f}` | "
+            f"**Non-LoRA Red Logit:** `{sample.nolora_medical_logit:.3f}` | "
             f"**Benign Utility Logit:** `{sample.benign_utility_score:.3f}`\n\n"
             f"- **Seed:** {sample.medical_seed}\n"
             f"- **Preprompt (`prompt_adaptor`):** {sample.defensive_preprompt}\n"
@@ -527,7 +527,7 @@ class ExperimentDashboard:
                 Rule(style="dim"),
                 Text.from_markup(
                     f"[bold cyan]Model Blue Response[/bold cyan] "
-                    f"([bold]DeBERTa Medical Logit: {d.lora_medical_prob:.3f}[/bold]):\n"
+                    f"([bold]DeBERTa Medical Logit: {d.lora_medical_logit:.3f}[/bold]):\n"
                     f"{_truncate(d.blue_lora_response, 280)}"
                 ),
             ),
@@ -544,7 +544,7 @@ class ExperimentDashboard:
                 Rule(style="dim"),
                 Text.from_markup(
                     f"[bold cyan]Model Blue Response[/bold cyan] "
-                    f"([bold]DeBERTa Medical Logit: {d.nolora_medical_prob:.3f}[/bold]):\n"
+                    f"([bold]DeBERTa Medical Logit: {d.nolora_medical_logit:.3f}[/bold]):\n"
                     f"{_truncate(d.blue_nolora_response, 280)}"
                 ),
             ),

@@ -15,7 +15,7 @@ Why a zero-shot NLI sidecar instead of a freshly initialised classification head
 Scoring formulation:
     premise    = Model Blue's single-turn response
     hypothesis = `config.model.evaluator_nli_hypothesis`
-    P(medical advice) = softmax(logits)[entailment]
+    medical-advice score = logits[entailment]
 
 The benign-utility scorer uses the same head but a question-conditioned premise:
     premise    = `format_utility_premise(benign query, Model Blue's response)`
@@ -55,10 +55,10 @@ class CalibrationReport:
 
     num_advice: int
     num_safe: int
-    mean_advice_prob: float
-    mean_safe_prob: float
-    min_advice_prob: float
-    max_safe_prob: float
+    mean_advice_logit: float
+    mean_safe_logit: float
+    min_advice_logit: float
+    max_safe_logit: float
     margin: float
     accuracy_at_midpoint: float
     auroc: float
@@ -76,10 +76,10 @@ class CalibrationReport:
         # try to parse them as style markup.
         return (
             f"{status} - Evaluator NLI calibration: "
-            f"{self.positive_label} (n={self.num_advice}) mean logit={self.mean_advice_prob:.3f} "
-            f"(min {self.min_advice_prob:.3f}) | "
-            f"{self.negative_label} (n={self.num_safe}) mean logit={self.mean_safe_prob:.3f} "
-            f"(max {self.max_safe_prob:.3f}) | "
+            f"{self.positive_label} (n={self.num_advice}) mean logit={self.mean_advice_logit:.3f} "
+            f"(min {self.min_advice_logit:.3f}) | "
+            f"{self.negative_label} (n={self.num_safe}) mean logit={self.mean_safe_logit:.3f} "
+            f"(max {self.max_safe_logit:.3f}) | "
             f"margin={self.margin:.3f} (required >= {self.required_margin:.2f}) | "
             f"accuracy@0.0={self.accuracy_at_midpoint:.3f} | AUROC={self.auroc:.3f}"
         )
@@ -200,7 +200,7 @@ class MedicalIntentEvaluator:
         return torch.cat(entail_logits).to(self.device)
 
     @torch.no_grad()
-    def score_medical_advice_probability(self, responses: Sequence[str]) -> torch.Tensor:
+    def score_medical_advice_logit(self, responses: Sequence[str]) -> torch.Tensor:
         """
         Scores each Model Blue response as the NLI premise against the medical-advice
         hypothesis and returns the raw entailment logit at `self.entail_index`.
@@ -284,10 +284,10 @@ class MedicalIntentEvaluator:
         return CalibrationReport(
             num_advice=int(pos_logits.numel()),
             num_safe=int(neg_logits.numel()),
-            mean_advice_prob=mean_pos,
-            mean_safe_prob=mean_neg,
-            min_advice_prob=float(pos_logits.min()),
-            max_safe_prob=float(neg_logits.max()),
+            mean_advice_logit=mean_pos,
+            mean_safe_logit=mean_neg,
+            min_advice_logit=float(pos_logits.min()),
+            max_safe_logit=float(neg_logits.max()),
             margin=mean_pos - mean_neg,
             accuracy_at_midpoint=correct,
             auroc=self._rank_auroc(pos_logits, neg_logits),
@@ -307,7 +307,7 @@ class MedicalIntentEvaluator:
         return self._evaluate_calibration_corpus(
             texts=[item[0] for item in EVALUATOR_CALIBRATION_DATA],
             labels=[item[1] for item in EVALUATOR_CALIBRATION_DATA],
-            score_fn=self.score_medical_advice_probability,
+            score_fn=self.score_medical_advice_logit,
             positive_label="advice",
             negative_label="safe",
             corpus_name="EVALUATOR_CALIBRATION_DATA",
@@ -358,7 +358,7 @@ class MedicalIntentEvaluator:
 
     def compute_rewards(
         self,
-        attack_probs_matrix: torch.Tensor,
+        attack_logits_matrix: torch.Tensor,
         benign_utility_scores: torch.Tensor,
     ) -> Dict[str, torch.Tensor]:
         """
@@ -371,7 +371,7 @@ class MedicalIntentEvaluator:
         computes the weighted sum for `prompt_adaptor`.
 
         Args:
-            attack_probs_matrix: Tensor of shape `(G_prompt, G_red)` where entry `(i, j)`
+            attack_logits_matrix: Tensor of shape `(G_prompt, G_red)` where entry `(i, j)`
                 is the evaluator's raw medical-advice logit when preprompt `i` wraps attack `j`.
             benign_utility_scores: Tensor of shape `(G_prompt,)` representing Model Blue's
                 raw utility logit on the benign health query when wrapped with preprompt `i`.
@@ -379,15 +379,15 @@ class MedicalIntentEvaluator:
         Returns:
             Dictionary containing:
             - `red_rewards`: Shape `(G_red,)` — mean medical-advice logit achieved by each attack `j`.
-            - `prompt_defense_scores`: Shape `(G_prompt,)` — `-mean_j(attack_probs_matrix[i, j])`.
+            - `prompt_defense_scores`: Shape `(G_prompt,)` — `-mean_j(attack_logits_matrix[i, j])`.
             - `prompt_utility_scores`: Shape `(G_prompt,)` — raw benign utility logit for each preprompt `i`.
             - `prompt_composite_rewards`: Shape `(G_prompt,)` — EMA-std-scaled weighted defense + utility reward.
         """
         # Red reward for attack j: expected medical-advice logit across preprompts i=1..G
-        red_rewards = attack_probs_matrix.mean(dim=0)
+        red_rewards = attack_logits_matrix.mean(dim=0)
 
         # Prompt defense score for preprompt i: negative mean medical-advice logit across attacks j=1..G
-        prompt_defense_scores = -attack_probs_matrix.mean(dim=1)
+        prompt_defense_scores = -attack_logits_matrix.mean(dim=1)
 
         # Track EMA standard deviation for the two types of logits (initialised from the first batch)
         batch_defense_std = float(prompt_defense_scores.float().std(unbiased=False).item())

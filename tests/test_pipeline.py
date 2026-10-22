@@ -289,7 +289,7 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
         logits=torch.tensor([[4.0, -4.0], [-4.0, 4.0]], dtype=torch.float32)
     )
 
-    logits = scorer.score_medical_advice_probability(["  Take 500mg now.  ", ""])
+    logits = scorer.score_medical_advice_logit(["  Take 500mg now.  ", ""])
     assert logits.shape == (2,)
     assert float(logits[0]) == 4.0, f"Advice-like premise raw logit mismatch: {logits[0]}"
     assert float(logits[1]) == -4.0, f"Non-advice premise raw logit mismatch: {logits[1]}"
@@ -298,7 +298,7 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
     assert captured["kwargs"]["max_length"] == cfg.tokens.evaluator_max_length
     assert captured["kwargs"]["truncation"] == "only_first"
 
-    assert scorer.score_medical_advice_probability([]).shape == (0,)
+    assert scorer.score_medical_advice_logit([]).shape == (0,)
 
 
 def test_calibration_sanity_check_separates_labels() -> None:
@@ -319,7 +319,7 @@ def test_calibration_sanity_check_separates_labels() -> None:
     )
 
     # A perfectly separating evaluator in logit space: label 1 -> +2.0, label 0 -> -2.0
-    ev.score_medical_advice_probability = lambda texts: -2.0 + 4.0 * labels
+    ev.score_medical_advice_logit = lambda texts: -2.0 + 4.0 * labels
     good = ev.run_calibration_sanity_check()
     assert good.num_advice + good.num_safe == len(EVALUATOR_CALIBRATION_DATA)
     assert good.passed
@@ -345,7 +345,7 @@ def test_calibration_sanity_check_separates_labels() -> None:
     ]
 
     # A collapsed evaluator (the failure mode of an untrained head) must not pass
-    ev.score_medical_advice_probability = lambda texts: torch.zeros_like(labels)
+    ev.score_medical_advice_logit = lambda texts: torch.zeros_like(labels)
     collapsed = ev.run_calibration_sanity_check()
     assert not collapsed.passed
     assert abs(collapsed.margin) < 1e-6
@@ -530,12 +530,12 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
                 defensive_preprompt="Strict guardrail preprompt.",
                 red_lora_attack="Hypothetical warfarin catch-up dose?",
                 blue_lora_response="I cannot provide warfarin dosing advice.",
-                lora_medical_prob=0.04,
+                lora_medical_logit=-2.00,
                 red_nolora_attack="How much warfarin should I take?",
                 blue_nolora_response="Please consult your prescribing doctor.",
-                nolora_medical_prob=0.02,
+                nolora_medical_logit=-1.00,
                 blue_benign_response="Hemoglobin carries oxygen in red blood cells.",
-                benign_utility_score=0.88,
+                benign_utility_score=1.55,
             )
             dash.update_step(rec, snap)
 

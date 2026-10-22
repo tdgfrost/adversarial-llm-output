@@ -95,7 +95,8 @@ class AdversarialCoEvolutionOrchestrator:
         console = Console()
         console.print(
             Panel(
-                f"[bold white]Model:[/bold white] {self.config.model.evaluator_model_id}\n\n"
+                f"[bold white]NLI Model:[/bold white] {self.config.model.evaluator_model_id}\n"
+                f"[bold white]Similarity Model:[/bold white] {self.config.model.similarity_model_id}\n\n"
                 f"[bold white]Medical Advice Hypothesis:[/bold white] {self.evaluator.hypothesis}\n"
                 f"{report.summary()}"
                 + utility_section

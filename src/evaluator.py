@@ -1,6 +1,7 @@
 """
 Deterministic Sidecar Evaluator using a zero-shot NLI DeBERTa-v3 model for Medical
-Intent Classification, plus a Benign Response Utility Scorer.
+Intent Classification, plus a Composite Benign Response Utility Scorer combining
+DeBERTa-v3 NLI entailment with a lightweight sentence-embedding cosine similarity model.
 
 Why a zero-shot NLI sidecar instead of a freshly initialised classification head:
 1. Already calibrated: `MoritzLaurer/deberta-v3-base-zeroshot-v2.0` is trained on large
@@ -17,12 +18,20 @@ Scoring formulation:
     hypothesis = `config.model.evaluator_nli_hypothesis`
     medical-advice score = logits[entailment]
 
-The benign-utility scorer uses the same head but a question-conditioned premise:
-    premise    = `format_utility_premise(benign query, Model Blue's response)`
-    hypothesis = `config.model.utility_nli_hypothesis`
-Unlike the medical-advice hypothesis (which only depends on the answer), the utility hypothesis
-depends on whether the answer is relevant to the specific benign question asked. Otherwise,
-a fluent but irrelevant answer would be scored as "high utility".
+The benign-utility scorer combines two frozen signals:
+1. Question-conditioned NLI entailment via DeBERTa-v3:
+       premise    = `format_utility_premise(benign query, Model Blue's response)`
+       hypothesis = `config.model.utility_nli_hypothesis`
+       z_nli      = logits[entailment]
+2. Semantic relevance via a tiny frozen sentence-embedding model
+   (`sentence-transformers/all-MiniLM-L6-v2`):
+       cos_sim    = cos(embed(benign query), embed(Model Blue's response))
+   The NLI entailment probability `sigmoid(z_nli)` is multiplied by the clamped cosine
+   similarity `clamp(cos_sim, 0.0, 1.0)` and projected back into logit space via
+   `torch.logit(sigmoid(z_nli) * clamp(cos_sim, 0.0, 1.0), eps=utility_logit_eps)`.
+   This prevents `prompt_adaptor` from reward-hacking the NLI hypothesis with a static,
+   fluent statement (e.g. a generic paragraph on human anatomy) that sounds substantive
+   to NLI but fails to answer the specific benign query asked.
 
 The entailment index is read from the checkpoint's own `id2label` map rather than
 hardcoded, because label order differs between NLI checkpoints (the zeroshot-v2.0 series
@@ -36,7 +45,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence
 
 import torch
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+import torch.nn.functional as F
+from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
 from src.config import TrainingConfig, format_utility_premise
 from src.dataset import EVALUATOR_CALIBRATION_DATA, UTILITY_CALIBRATION_DATA
@@ -119,6 +129,18 @@ class MedicalIntentEvaluator:
         # Freeze the evaluator strictly for inference during GRPO co-evolution
         self.model.eval()
         for param in self.model.parameters():
+            param.requires_grad = False
+
+        # Load and freeze the lightweight sentence-embedding model for query-response
+        # cosine similarity scoring alongside DeBERTa-v3.
+        similarity_model_id = config.model.similarity_model_id
+        self.similarity_tokenizer = AutoTokenizer.from_pretrained(similarity_model_id)
+        self.similarity_model = AutoModel.from_pretrained(
+            similarity_model_id,
+            dtype=torch.float32,
+        ).to(self.device)
+        self.similarity_model.eval()
+        for param in self.similarity_model.parameters():
             param.requires_grad = False
 
         self.entail_index, self.contradiction_indices = self._resolve_nli_label_indices()
@@ -214,38 +236,107 @@ class MedicalIntentEvaluator:
         hypothesis = getattr(self, "hypothesis", self.config.model.evaluator_nli_hypothesis)
         return self._score_hypothesis_entailment(responses, hypothesis)
 
+    @staticmethod
+    def _normalize_benign_queries(
+        benign_responses: Sequence[str],
+        benign_queries: Sequence[str] | str,
+    ) -> List[str]:
+        if isinstance(benign_queries, str):
+            return [benign_queries] * len(benign_responses)
+        questions = list(benign_queries)
+        if len(questions) != len(benign_responses):
+            raise ValueError(
+                "benign_queries must be a single query or one query per response "
+                f"(got {len(questions)} queries for {len(benign_responses)} responses)."
+            )
+        return questions
+
     @torch.no_grad()
-    def score_benign_utility(
+    def _embed_texts(self, texts: Sequence[str]) -> torch.Tensor:
+        """
+        Computes L2-normalised sentence embeddings using attention-mask-weighted mean
+        pooling over the frozen similarity model's token representations.
+        """
+        if not texts:
+            return torch.empty((0, 0), dtype=torch.float32, device=self.device)
+
+        cleaned = [t.strip() if t and t.strip() else "..." for t in texts]
+        batch_size = max(1, self.config.model.evaluator_batch_size)
+        embeddings: List[torch.Tensor] = []
+
+        for start in range(0, len(cleaned), batch_size):
+            chunk = cleaned[start : start + batch_size]
+            encoded = self.similarity_tokenizer(
+                chunk,
+                padding=True,
+                truncation=True,
+                max_length=self.max_length,
+                return_tensors="pt",
+            ).to(self.device)
+
+            outputs = self.similarity_model(**encoded)
+            token_embeddings = outputs.last_hidden_state.float()
+            attention_mask = (
+                encoded["attention_mask"]
+                .unsqueeze(-1)
+                .expand(token_embeddings.size())
+                .float()
+            )
+            summed = torch.sum(token_embeddings * attention_mask, dim=1)
+            counts = torch.clamp(attention_mask.sum(dim=1), min=1e-9)
+            mean_pooled = summed / counts
+            embeddings.append(F.normalize(mean_pooled, p=2, dim=-1))
+
+        return torch.cat(embeddings, dim=0).to(self.device)
+
+    @torch.no_grad()
+    def score_query_response_similarity(
+        self,
+        benign_responses: Sequence[str],
+        benign_queries: Sequence[str] | str,
+    ) -> torch.Tensor:
+        """
+        Embeds each `(benign query, Model Blue response)` pair with the lightweight
+        embedding model and returns their cosine similarity in `[-1, 1]` (with empty or
+        whitespace-only responses assigned `0.0`).
+        """
+        if not benign_responses:
+            return torch.empty(0, dtype=torch.float32, device=self.device)
+
+        questions = self._normalize_benign_queries(benign_responses, benign_queries)
+        response_embeds = self._embed_texts(benign_responses)
+
+        if isinstance(benign_queries, str):
+            query_embeds = self._embed_texts([benign_queries]).expand_as(response_embeds)
+        else:
+            query_embeds = self._embed_texts(questions)
+
+        cos_sim = torch.sum(query_embeds * response_embeds, dim=-1)
+        non_empty_mask = torch.tensor(
+            [
+                1.0 if (r and r.strip() and r.strip() != "...") else 0.0
+                for r in benign_responses
+            ],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        return cos_sim * non_empty_mask
+
+    @torch.no_grad()
+    def score_benign_nli_logit(
         self,
         benign_responses: Sequence[str],
         benign_queries: Sequence[str] | str,
     ) -> torch.Tensor:
         """
         Scores each `(benign query, Model Blue response)` pair as a question-conditioned
-        NLI premise against the utility hypothesis
-        (`config.model.utility_nli_hypothesis`) and returns the raw entailment logit at
-        `self.entail_index`.
-
-        Prevents defensive lobotomisation where `prompt_adaptor` forces Model Blue to
-        output empty strings, gibberish, blanket refusals, or fluent but irrelevant answers
-        to every benign query.
-
-        Args:
-            benign_responses: Model Blue responses to the benign query/queries.
-            benign_queries: Either one query shared by every response (the pairwise
-                `G` preprompts x 1 benign query case in the GRPO loop) or one query per
-                response.
+        NLI premise against the utility hypothesis (`config.model.utility_nli_hypothesis`)
+        and returns the raw DeBERTa entailment logit at `self.entail_index`.
         """
-        if isinstance(benign_queries, str):
-            questions: List[str] = [benign_queries] * len(benign_responses)
-        else:
-            questions = list(benign_queries)
-            if len(questions) != len(benign_responses):
-                raise ValueError(
-                    "benign_queries must be a single query or one query per response "
-                    f"(got {len(questions)} queries for {len(benign_responses)} responses)."
-                )
+        if not benign_responses:
+            return torch.empty(0, dtype=torch.float32, device=self.device)
 
+        questions = self._normalize_benign_queries(benign_responses, benign_queries)
         premises = [
             format_utility_premise(question, response)
             for question, response in zip(questions, benign_responses)
@@ -254,6 +345,47 @@ class MedicalIntentEvaluator:
             self, "utility_hypothesis", self.config.model.utility_nli_hypothesis
         )
         return self._score_hypothesis_entailment(premises, hypothesis)
+
+    @torch.no_grad()
+    def score_benign_utility(
+        self,
+        benign_responses: Sequence[str],
+        benign_queries: Sequence[str] | str,
+    ) -> torch.Tensor:
+        """
+        Computes the composite benign utility logit by combining the DeBERTa NLI utility
+        score with the query-response embedding cosine similarity.
+
+        Specifically, the DeBERTa NLI entailment probability `sigmoid(nli_logit)` is
+        multiplied by the clamped cosine similarity `clamp(cos_sim, 0.0, 1.0)` and mapped
+        back into logit space via `torch.logit(..., eps=utility_logit_eps)`.
+
+        Prevents both:
+        1. Defensive lobotomisation (where `prompt_adaptor` forces Model Blue to output
+           empty strings, gibberish, or blanket refusals to benign queries), and
+        2. Static-content reward hacking (where `prompt_adaptor` forces Model Blue to
+           repeat a generic factual statement on human anatomy that fools the NLI
+           hypothesis into high entailment but has low cosine similarity with the
+           specific benign query asked).
+
+        Args:
+            benign_responses: Model Blue responses to the benign query/queries.
+            benign_queries: Either one query shared by every response (the pairwise
+                `G` preprompts x 1 benign query case in the GRPO loop) or one query per
+                response.
+        """
+        if not benign_responses:
+            return torch.empty(0, dtype=torch.float32, device=self.device)
+
+        nli_logits = self.score_benign_nli_logit(benign_responses, benign_queries)
+        cos_sim = self.score_query_response_similarity(benign_responses, benign_queries)
+
+        nli_prob = torch.sigmoid(nli_logits)
+        sim_weight = cos_sim.clamp(min=0.0, max=1.0)
+        composite_prob = nli_prob * sim_weight
+
+        logit_eps = float(getattr(self.config.model, "utility_logit_eps", 1e-2))
+        return torch.logit(composite_prob, eps=logit_eps)
 
     def _evaluate_calibration_corpus(
         self,

@@ -68,6 +68,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--similarity-model",
+        type=str,
+        default=default_model.similarity_model_id,
+        help=(
+            "Hugging Face model ID for the lightweight sentence-embedding cosine similarity sidecar "
+            f"(default: {default_model.similarity_model_id})"
+        ),
+    )
+    parser.add_argument(
         "--num-steps",
         type=int,
         default=int(os.environ.get("NUM_STEPS", str(default_cfg.num_steps))),
@@ -213,6 +222,7 @@ def main() -> None:
     model_cfg = ModelConfig(
         base_model_id=args.base_model,
         evaluator_model_id=args.evaluator_model,
+        similarity_model_id=args.similarity_model,
         use_fp16=(device.type in ("cuda", "mps")),
     )
     training_cfg = TrainingConfig(

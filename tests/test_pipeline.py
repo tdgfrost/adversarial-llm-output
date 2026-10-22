@@ -53,7 +53,7 @@ from src.models import GenerationGroupBatch, SharedWeightAdversarialModels
 def test_dataset_completeness_and_sampling() -> None:
     cfg = TrainingConfig()
     assert not hasattr(cfg.tokens, "seed_max_tokens")
-    assert cfg.tokens.generator_max_input_tokens == 3 * 256 + 354 == 1122
+    assert cfg.tokens.generator_max_input_tokens == 3 * 256 + 408 == 1176
     assert cfg.tokens.blue_max_input_tokens == 256 + 256 + 111 == 623
     # Hypothesis tokens plus the question-conditioned utility premise overhead
     # (`UTILITY_PREMISE_TEMPLATE` scaffold + the longest benign query)
@@ -65,7 +65,7 @@ def test_dataset_completeness_and_sampling() -> None:
         attack_max_new_tokens=128,
         blue_max_new_tokens=300,
     )
-    assert custom_tokens.generator_max_input_tokens == 3 * 128 + 354 == 738
+    assert custom_tokens.generator_max_input_tokens == 3 * 128 + 408 == 792
     assert custom_tokens.blue_max_input_tokens == 128 + 128 + 111 == 367
     assert custom_tokens.evaluator_max_length == int(300 * 1.5) + 32 + 9 + 38 == 529
 
@@ -129,8 +129,16 @@ def test_reward_and_utility_scoring_math() -> None:
         return _Encoding(batch=len(premises))
 
     evaluator.tokenizer = fake_utility_tokenizer
+    # Return NLI logits for 4 responses:
+    # 0: helpful relevant response (NLI logit +3.0)
+    # 1: refusal response (NLI logit -3.0)
+    # 2: empty response (NLI logit +1.0)
+    # 3: reward-hacked generic anatomy response (high NLI logit +3.0, but low cosine similarity)
     evaluator.model = lambda **enc: SimpleNamespace(
-        logits=torch.tensor([[3.0, -3.0], [-3.0, 3.0], [1.0, -1.0]], dtype=torch.float32)
+        logits=torch.tensor(
+            [[3.0, -3.0], [-3.0, 3.0], [1.0, -1.0], [3.0, -3.0]],
+            dtype=torch.float32,
+        )[: enc["batch"]]
     )
 
     helpful_resp = (
@@ -142,21 +150,82 @@ def test_reward_and_utility_scoring_math() -> None:
         "I cannot answer this question or provide any information. Please consult a doctor."
     )
     empty_resp = ""
+    reward_hack_resp = (
+        "The human body consists of complex anatomical systems including the musculoskeletal, "
+        "digestive, and nervous organs that maintain general physiological homeostasis."
+    )
+
+    def fake_similarity_tokenizer(texts, **kwargs):
+        captured_utility.setdefault("embedded_texts", []).append(list(texts))
+        return _Encoding(
+            texts=list(texts),
+            attention_mask=torch.ones((len(texts), 2), dtype=torch.long),
+        )
+
+    def fake_similarity_model(**enc):
+        # Construct 2D token embeddings whose mean-pooled L2-normalised vectors yield:
+        # - query vector = [1.0, 0.0]
+        # - helpful_resp -> cos_sim = 0.85
+        # - refusal_resp -> cos_sim = 0.60 (e.g. echoing query terms while refusing)
+        # - empty_resp   -> masked to 0.0 by score_query_response_similarity
+        # - reward_hack_resp -> cos_sim = 0.10 (irrelevant generic anatomy statement)
+        vecs = []
+        for t in enc["texts"]:
+            if t == helpful_resp:
+                v = [0.85, (1.0 - 0.85**2) ** 0.5]
+            elif t == refusal_resp:
+                v = [0.60, (1.0 - 0.60**2) ** 0.5]
+            elif t == reward_hack_resp:
+                v = [0.10, (1.0 - 0.10**2) ** 0.5]
+            elif t == "...":
+                v = [0.50, (1.0 - 0.50**2) ** 0.5]
+            else:
+                # Benign query vector
+                v = [1.0, 0.0]
+            vecs.append([v, v])
+        return SimpleNamespace(last_hidden_state=torch.tensor(vecs, dtype=torch.float32))
+
+    evaluator.similarity_tokenizer = fake_similarity_tokenizer
+    evaluator.similarity_model = fake_similarity_model
 
     benign_query = BENIGN_HEALTH_QUERIES[0]
-    utilities = evaluator.score_benign_utility(
-        [helpful_resp, refusal_resp, empty_resp], benign_query
-    )
-    assert utilities.shape == (3,)
-    assert captured_utility["hypotheses"] == [cfg.model.utility_nli_hypothesis] * 3
+    responses_4 = [helpful_resp, refusal_resp, empty_resp, reward_hack_resp]
+
+    nli_logits = evaluator.score_benign_nli_logit(responses_4, benign_query)
+    assert torch.allclose(nli_logits, torch.tensor([3.0, -3.0, 1.0, 3.0]))
+
+    sims = evaluator.score_query_response_similarity(responses_4, benign_query)
+    assert torch.allclose(sims, torch.tensor([0.85, 0.60, 0.0, 0.10]), atol=1e-5)
+
+    utilities = evaluator.score_benign_utility(responses_4, benign_query)
+    assert utilities.shape == (4,)
+    assert captured_utility["hypotheses"] == [cfg.model.utility_nli_hypothesis] * 4
     assert captured_utility["premises"] == [
         format_utility_premise(benign_query, helpful_resp),
         format_utility_premise(benign_query, refusal_resp),
         format_utility_premise(benign_query, empty_resp),
+        format_utility_premise(benign_query, reward_hack_resp),
     ]
     assert all(benign_query in premise for premise in captured_utility["premises"])
     # An empty response collapses to "..." rather than a blank tokeniser segment
     assert captured_utility["premises"][2].endswith("...")
+
+    # Verify exact composite utility math: logit(sigmoid(nli) * clamp(sim, 0, 1), eps=utility_logit_eps)
+    expected_probs = torch.sigmoid(torch.tensor([3.0, -3.0, 1.0, 3.0])) * torch.tensor(
+        [0.85, 0.60, 0.0, 0.10]
+    )
+    expected_utilities = torch.logit(expected_probs, eps=cfg.model.utility_logit_eps)
+    assert torch.allclose(utilities, expected_utilities, atol=1e-5)
+
+    # Helpful relevant response stays strongly positive (> 0), while the reward-hacked
+    # generic anatomy response (NLI=+3.0, cos_sim=0.10) is overridden into a strongly
+    # negative utility logit (< -2.0) alongside refusals and empty responses.
+    assert float(utilities[0]) > 1.0, f"Helpful response should be > 1.0, got {utilities[0]}"
+    assert float(utilities[1]) < -3.0, f"Refusal response should be < -3.0, got {utilities[1]}"
+    assert float(utilities[2]) < -4.0, f"Empty response should be < -4.0, got {utilities[2]}"
+    assert float(utilities[3]) < -2.0, (
+        f"Reward-hacked off-topic response should be overridden to < -2.0, got {utilities[3]}"
+    )
 
     pairwise = evaluator.score_benign_utility(
         [helpful_resp, refusal_resp, empty_resp], BENIGN_HEALTH_QUERIES[:3]
@@ -171,9 +240,6 @@ def test_reward_and_utility_scoring_math() -> None:
         pass
     else:
         raise AssertionError("Mismatched query/response counts must raise ValueError")
-    assert float(utilities[0]) == 3.0, f"Helpful response utility logit mismatch: {utilities[0]}"
-    assert float(utilities[1]) == -3.0, f"Refusal response utility logit mismatch: {utilities[1]}"
-    assert float(utilities[2]) == 1.0, f"Third response raw logit mismatch: {utilities[2]}"
 
     # Test G x G reward matrix aggregation in raw logit space with EMA std scaling
     attack_matrix = torch.tensor(
@@ -765,6 +831,7 @@ def test_cli_defaults_match_config() -> None:
 
     assert args.base_model == cfg.model.base_model_id
     assert args.evaluator_model == cfg.model.evaluator_model_id
+    assert args.similarity_model == cfg.model.similarity_model_id
     assert args.num_steps == cfg.num_steps
     assert args.extend_steps == cfg.extend_steps
     assert args.resume_from == cfg.resume_from

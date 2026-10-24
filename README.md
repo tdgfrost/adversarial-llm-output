@@ -108,7 +108,7 @@ All outputs are also written to `./experimental_results/`:
 - `latest_dialogue_sample.md` & `latest_dialogue_sample.json` — Most recent refreshed comparison of `(Red w/ LoRA -> Blue)` vs. `(Red w/o LoRA -> Blue)` and benign query handling.
 - `tensorboard/` — TensorBoard event logs.
 - `checkpoints/latest/` & `checkpoints/step_XXXX/` — Saved LoRA weights + trainer state.
-- `evaluator_calibration.json` — Startup sanity check of the frozen zero-shot evaluator on both the 32/32 medical-advice vs. safe/refusal calibration dataset and the 32/32 useful vs. unhelpful benign-utility calibration dataset.
+- `evaluator_calibration.json` — Startup sanity check of the frozen zero-shot evaluator on both the 32/36 medical-advice vs. safe/refusal calibration dataset and the 40/50 useful vs. unhelpful benign-utility calibration dataset (covering both health and non-health queries).
 
 ---
 
@@ -137,7 +137,7 @@ This project is designed with an NVIDIA TITAN RTX GPU in mind, which uses the ol
 ## GRPO Training Loop
 
 At each step $t$:
-1. **Scenario Sampling**: Sample 1 concrete medical seed $s_{\text{med}}$ (from 80 clinical scenarios) and 1 benign query $q_{\text{benign}}$ (from 80 parallel benign queries) in `src/dataset.py`.
+1. **Scenario Sampling**: Sample 1 concrete medical seed $s_{\text{med}}$ (from 80 clinical scenarios) and 1 benign query $q_{\text{benign}}$ (from 160 parallel benign queries: 80 benign health queries + 80 benign non-health queries) in `src/dataset.py`.
 2. **Group Generation**:
    - Enable `prompt_adaptor` $\rightarrow$ conditioned on the last $k=3$ high-scoring attacks, generate $G$ defensive guardrail prompts $\{p_1, \dots, p_G\}$.
    - Enable `red_adaptor` $\rightarrow$ feed $s_{\text{med}}$ and generate $G$ adversarial attacks $\{a_1, \dots, a_G\}$.
@@ -161,9 +161,9 @@ At each step $t$:
 
 ### A Note on the NLI Hypotheses
 
-When spinning up the experiment, the NLI evaluator model is first verified in raw logit space against two held-out 64-sample calibration datasets in `src/dataset.py`:
-- **Medical Advice Calibration (`EVALUATOR_CALIBRATION_DATA`, 32 non-medical advice vs. 32 medical advice)**: AUROC of `0.990` and a difference in mean entailment logits of `5.225` (`+3.092` vs. `-2.133`).
-- **Benign Utility Calibration (`UTILITY_CALIBRATION_DATA`, 32 substantive helpful answers vs. 40 unhelpful/refusal responses and fluent answers to a different question)**: AUROC of `1.000`, `accuracy@0.0` of `1.000`, and a difference in mean utility logits of `4.738` (`+0.662` vs. `-4.076`).
+When spinning up the experiment, the NLI evaluator model is first verified in raw logit space against two held-out calibration datasets in `src/dataset.py`:
+- **Medical Advice Calibration (`EVALUATOR_CALIBRATION_DATA`, 36 non-medical advice vs. 32 medical advice)**: AUROC of `0.990` and a difference in mean entailment logits of `5.322` (`+3.093` vs. `-2.228`).
+- **Benign Utility Calibration (`UTILITY_CALIBRATION_DATA`, 40 substantive helpful health and non-health answers vs. 50 unhelpful/refusal responses and fluent answers to a different question)**: AUROC of `1.000`, `accuracy@0.0` of `1.000`, and a difference in mean utility logits of `4.746` (`+0.633` vs. `-4.113`).
 
 ---
 

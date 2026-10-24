@@ -40,6 +40,8 @@ from src.dashboard import (
 )
 from src.dataset import (
     BENIGN_HEALTH_QUERIES,
+    BENIGN_NON_HEALTH_QUERIES,
+    BENIGN_QUERIES,
     EVALUATOR_CALIBRATION_DATA,
     MEDICAL_SEED_SCENARIOS,
     UTILITY_CALIBRATION_DATA,
@@ -84,24 +86,50 @@ def test_dataset_completeness_and_sampling() -> None:
     assert len(set(MEDICAL_SEED_SCENARIOS)) == len(MEDICAL_SEED_SCENARIOS), (
         "Medical seeds must be distinct"
     )
-    assert len(BENIGN_HEALTH_QUERIES) == len(MEDICAL_SEED_SCENARIOS), (
-        "Parallel benign health query set should match medical seed count"
+    assert len(BENIGN_HEALTH_QUERIES) == len(MEDICAL_SEED_SCENARIOS) == 80, (
+        "Parallel benign health query set should match medical seed count (80)"
     )
     assert len(set(BENIGN_HEALTH_QUERIES)) == len(BENIGN_HEALTH_QUERIES), (
         "Benign health queries must be distinct"
+    )
+    assert len(BENIGN_NON_HEALTH_QUERIES) == len(MEDICAL_SEED_SCENARIOS) == 80, (
+        "Parallel benign non-health query set should match medical seed count (80)"
+    )
+    assert len(set(BENIGN_NON_HEALTH_QUERIES)) == len(BENIGN_NON_HEALTH_QUERIES), (
+        "Benign non-health queries must be distinct"
+    )
+    assert len(BENIGN_QUERIES) == 160
+    assert len(set(BENIGN_QUERIES)) == 160, (
+        "Combined health and non-health benign queries must be completely disjoint and distinct"
     )
     assert len(EVALUATOR_CALIBRATION_DATA) >= 50
     assert len(UTILITY_CALIBRATION_DATA) >= 50
     assert all(len(item) == 3 for item in UTILITY_CALIBRATION_DATA), (
         "Utility calibration items must be (question, response, label) triples"
     )
+    non_health_set = set(BENIGN_NON_HEALTH_QUERIES)
+    assert any(item[0] in non_health_set and item[2] == 1 for item in UTILITY_CALIBRATION_DATA), (
+        "Utility calibration data must include positive (label=1) benign non-health examples"
+    )
+    assert any(item[0] in non_health_set and item[2] == 0 for item in UTILITY_CALIBRATION_DATA), (
+        "Utility calibration data must include negative (label=0) benign non-health examples"
+    )
 
     ds = AdversarialDataset(seed=123)
+    assert len(ds.benign_queries) == 160
     seen_seeds = set()
+    seen_benign = set()
     for step in range(1, len(ds) + 1):
         sample = ds.sample_step(step)
         seen_seeds.add(sample.seed_idx)
+        seen_benign.add(sample.benign_idx)
     assert len(seen_seeds) == len(ds), "Dataset should visit all seeds in one epoch cycle"
+    for step in range(len(ds) + 1, len(ds.benign_queries) + 1):
+        sample = ds.sample_step(step)
+        seen_benign.add(sample.benign_idx)
+    assert len(seen_benign) == 160, (
+        "Dataset should visit all 160 benign (health + non-health) queries in one full benign cycle"
+    )
 
 
 def test_reward_and_utility_scoring_math() -> None:

@@ -431,8 +431,9 @@ class MedicalIntentEvaluator:
     def run_calibration_sanity_check(self) -> CalibrationReport:
         """
         Scores the held-out `EVALUATOR_CALIBRATION_DATA` items (32 medical-advice /
-        32 safe-or-refusal) to confirm the medical-advice hypothesis string produces a
-        wide, healthy margin between the two labels before any GRPO training happens.
+        36 safe-or-refusal health and non-health responses) to confirm the medical-advice
+        hypothesis string produces a wide, healthy margin between the two labels before
+        any GRPO training happens.
 
         No weights are updated: this is purely a diagnostic over the frozen model.
         """
@@ -447,10 +448,10 @@ class MedicalIntentEvaluator:
 
     def run_utility_calibration_sanity_check(self) -> CalibrationReport:
         """
-        Scores the held-out `UTILITY_CALIBRATION_DATA` items (32 substantive helpful
-        answers / 38 unhelpful refusals, non-answers, and fluent but irrelevant answers)
-        to confirm the benign-utility hypothesis string separates useful
-        responses from unhelpful responses.
+        Scores the held-out `UTILITY_CALIBRATION_DATA` items (40 substantive helpful
+        health and non-health answers / 50 unhelpful refusals, non-answers, and fluent
+        but irrelevant answers) to confirm the benign-utility hypothesis string separates
+        useful responses from unhelpful responses.
         """
         questions = [item[0] for item in UTILITY_CALIBRATION_DATA]
         return self._evaluate_calibration_corpus(

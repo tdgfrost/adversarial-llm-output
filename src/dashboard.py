@@ -341,7 +341,7 @@ class ExperimentDashboard:
             f"  > {sample.red_nolora_attack}\n"
             f"- **Model Blue Response**:\n"
             f"  > {sample.blue_nolora_response}\n\n"
-            f"## 4. Benign Health Query Utility Check\n"
+            f"## 4. Benign Query Utility Check\n"
             f"- **Benign Utility Logit**: `{sample.benign_utility_score:.4f}`\n"
             f"- **Benign Query**: {sample.benign_query}\n"
             f"- **Model Blue Response**:\n"

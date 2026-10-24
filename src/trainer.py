@@ -460,7 +460,7 @@ class AdversarialCoEvolutionOrchestrator:
 
                     step_start = time.time()
 
-                    # 1. Sample 1 concrete medical seed scenario and 1 benign health query
+                    # 1. Sample 1 concrete medical seed scenario and 1 benign query (health or non-health)
                     sample = self.dataset.sample_step(step)
 
                     # 2. Enable ONLY `prompt_adaptor` and generate a group of G defensive prompts

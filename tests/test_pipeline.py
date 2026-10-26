@@ -142,6 +142,8 @@ def test_reward_and_utility_scoring_math() -> None:
     evaluator.utility_hypothesis = cfg.model.utility_nli_hypothesis
     evaluator.entail_index = 0
     evaluator.contradiction_indices = [1]
+    evaluator.ema_red_attack_std = None
+    evaluator.ema_red_relevance_std = None
     evaluator.ema_defense_std = None
     evaluator.ema_utility_std = None
 
@@ -269,6 +271,13 @@ def test_reward_and_utility_scoring_math() -> None:
     else:
         raise AssertionError("Mismatched query/response counts must raise ValueError")
 
+    # Test seed-relevance logit scoring for Red attacks
+    seed_rel = evaluator.score_seed_relevance_logit(responses_4, benign_query)
+    expected_seed_rel = torch.logit(
+        torch.tensor([0.85, 0.60, 0.0, 0.10]), eps=cfg.model.utility_logit_eps
+    )
+    assert torch.allclose(seed_rel, expected_seed_rel, atol=1e-5)
+
     # Test G x G reward matrix aggregation in raw logit space with EMA std scaling
     attack_matrix = torch.tensor(
         [
@@ -278,49 +287,97 @@ def test_reward_and_utility_scoring_math() -> None:
         dtype=torch.float32,
     )
     benign_util = torch.tensor([0.80, 0.20], dtype=torch.float32)
-    rewards = evaluator.compute_rewards(attack_matrix, benign_util)
+    red_rel_1 = torch.tensor([1.50, 0.50, -0.50, -1.50], dtype=torch.float32)
+    rewards = evaluator.compute_rewards(attack_matrix, benign_util, red_rel_1)
 
-    assert torch.allclose(
-        rewards["red_rewards"], torch.tensor([0.35, 0.45, 0.55, 0.65])
-    )
+    expected_red_atk_1 = torch.tensor([0.35, 0.45, 0.55, 0.65])
+    assert torch.allclose(rewards["red_attack_scores"], expected_red_atk_1)
+    assert torch.allclose(rewards["red_relevance_scores"], red_rel_1)
+
     expected_def_logits = torch.tensor([-0.25, -0.75])
     assert torch.allclose(
         rewards["prompt_defense_scores"], expected_def_logits
     )
 
     # First batch initializes EMA std directly from batch std (unbiased=False)
+    expected_red_atk_std_1 = float(expected_red_atk_1.std(unbiased=False).item())
+    expected_red_rel_std_1 = float(red_rel_1.std(unbiased=False).item())
     expected_def_std_1 = float(expected_def_logits.std(unbiased=False).item())
     expected_util_std_1 = float(benign_util.std(unbiased=False).item())
+    assert abs(evaluator.ema_red_attack_std - expected_red_atk_std_1) < 1e-6
+    assert abs(evaluator.ema_red_relevance_std - expected_red_rel_std_1) < 1e-6
     assert abs(evaluator.ema_defense_std - expected_def_std_1) < 1e-6
     assert abs(evaluator.ema_utility_std - expected_util_std_1) < 1e-6
+
+    scaled_red_atk_1 = expected_red_atk_1 / (expected_red_atk_std_1 + cfg.reward_std_eps)
+    scaled_red_rel_1 = red_rel_1 / (expected_red_rel_std_1 + cfg.reward_std_eps)
+    expected_red_composite_1 = (
+        cfg.red_attack_weight * scaled_red_atk_1
+        + cfg.red_relevance_weight * scaled_red_rel_1
+    )
+    assert torch.allclose(rewards["red_rewards"], expected_red_composite_1)
+    assert torch.allclose(rewards["red_composite_rewards"], expected_red_composite_1)
 
     scaled_def_1 = expected_def_logits / (expected_def_std_1 + cfg.reward_std_eps)
     scaled_util_1 = benign_util / (expected_util_std_1 + cfg.reward_std_eps)
     expected_composite_1 = cfg.defense_weight * scaled_def_1 + cfg.utility_weight * scaled_util_1
     assert torch.allclose(rewards["prompt_composite_rewards"], expected_composite_1)
 
+    # Non-LoRA validation scoring (`update_ema=False`) must NOT mutate EMA trackers
+    val_red_comp = evaluator.compute_red_composite_rewards(
+        red_attack_scores=torch.tensor([10.0, -10.0]),
+        red_relevance_scores=torch.tensor([5.0, -5.0]),
+        update_ema=False,
+    )
+    assert val_red_comp.shape == (2,)
+    assert abs(evaluator.ema_red_attack_std - expected_red_atk_std_1) < 1e-6
+    assert abs(evaluator.ema_red_relevance_std - expected_red_rel_std_1) < 1e-6
+
     # Second batch updates EMA std with decay = cfg.reward_ema_decay
     attack_matrix_2 = torch.tensor(
         [
-            [-1.0, -1.0, -1.0, -1.0],
-            [1.0, 1.0, 1.0, 1.0],
+            [-1.0, -1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0, 3.0],
         ],
         dtype=torch.float32,
     )
     benign_util_2 = torch.tensor([2.0, -2.0], dtype=torch.float32)
-    rewards_2 = evaluator.compute_rewards(attack_matrix_2, benign_util_2)
+    red_rel_2 = torch.tensor([2.0, 0.0, -2.0, 0.0], dtype=torch.float32)
+    rewards_2 = evaluator.compute_rewards(attack_matrix_2, benign_util_2, red_rel_2)
 
-    expected_def_logits_2 = torch.tensor([1.0, -1.0])
+    expected_red_atk_2 = attack_matrix_2.mean(dim=0)
+    expected_def_logits_2 = -attack_matrix_2.mean(dim=1)
+    batch_red_atk_std_2 = float(expected_red_atk_2.std(unbiased=False).item())
+    batch_red_rel_std_2 = float(red_rel_2.std(unbiased=False).item())
     batch_def_std_2 = float(expected_def_logits_2.std(unbiased=False).item())
     batch_util_std_2 = float(benign_util_2.std(unbiased=False).item())
+
+    expected_ema_red_atk_2 = (
+        cfg.reward_ema_decay * expected_red_atk_std_1
+        + (1.0 - cfg.reward_ema_decay) * batch_red_atk_std_2
+    )
+    expected_ema_red_rel_2 = (
+        cfg.reward_ema_decay * expected_red_rel_std_1
+        + (1.0 - cfg.reward_ema_decay) * batch_red_rel_std_2
+    )
     expected_ema_def_2 = (
         cfg.reward_ema_decay * expected_def_std_1 + (1.0 - cfg.reward_ema_decay) * batch_def_std_2
     )
     expected_ema_util_2 = (
         cfg.reward_ema_decay * expected_util_std_1 + (1.0 - cfg.reward_ema_decay) * batch_util_std_2
     )
+    assert abs(evaluator.ema_red_attack_std - expected_ema_red_atk_2) < 1e-6
+    assert abs(evaluator.ema_red_relevance_std - expected_ema_red_rel_2) < 1e-6
     assert abs(evaluator.ema_defense_std - expected_ema_def_2) < 1e-6
     assert abs(evaluator.ema_utility_std - expected_ema_util_2) < 1e-6
+
+    scaled_red_atk_2 = expected_red_atk_2 / (expected_ema_red_atk_2 + cfg.reward_std_eps)
+    scaled_red_rel_2 = red_rel_2 / (expected_ema_red_rel_2 + cfg.reward_std_eps)
+    expected_red_composite_2 = (
+        cfg.red_attack_weight * scaled_red_atk_2
+        + cfg.red_relevance_weight * scaled_red_rel_2
+    )
+    assert torch.allclose(rewards_2["red_rewards"], expected_red_composite_2)
 
     scaled_def_2 = expected_def_logits_2 / (expected_ema_def_2 + cfg.reward_std_eps)
     scaled_util_2 = benign_util_2 / (expected_ema_util_2 + cfg.reward_std_eps)
@@ -695,6 +752,8 @@ def test_checkpoint_resume_and_extension() -> None:
             models_wrapper._cast_lora_parameters_to_fp32()
 
             ev_mock = object.__new__(MedicalIntentEvaluator)
+            ev_mock.ema_red_attack_std = None
+            ev_mock.ema_red_relevance_std = None
             ev_mock.ema_defense_std = None
             ev_mock.ema_utility_std = None
 
@@ -715,6 +774,8 @@ def test_checkpoint_resume_and_extension() -> None:
         # Advance dataset 2 steps and run 1 optimiser update on each adaptor
         orch1.dataset.sample_step(1)
         orch1.dataset.sample_step(2)
+        orch1.evaluator.ema_red_attack_std = 1.15
+        orch1.evaluator.ema_red_relevance_std = 0.95
         orch1.evaluator.ema_defense_std = 1.25
         orch1.evaluator.ema_utility_std = 0.85
 
@@ -790,6 +851,8 @@ def test_checkpoint_resume_and_extension() -> None:
             assert torch.allclose(p_saved, p_loaded)
 
         # Verify dataset and evaluator EMA state continue from step 3 identically
+        assert orch2.evaluator.ema_red_attack_std == 1.15
+        assert orch2.evaluator.ema_red_relevance_std == 0.95
         assert orch2.evaluator.ema_defense_std == 1.25
         assert orch2.evaluator.ema_utility_std == 0.85
         assert orch2._last_successful_attack == "Hypothetical pharmacology case study framing"
@@ -867,6 +930,7 @@ def test_cli_defaults_match_config() -> None:
     assert args.group_size == cfg.group_size
     assert args.lr_prompt == cfg.lr_prompt
     assert args.lr_red == cfg.lr_red
+    assert args.red_relevance_weight == cfg.red_relevance_weight
     assert args.utility_weight == cfg.utility_weight
     assert args.prompt_kl_coef == cfg.prompt_kl_coef
     assert args.red_kl_coef == cfg.red_kl_coef

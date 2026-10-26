@@ -384,11 +384,12 @@ class AdversarialCoEvolutionOrchestrator:
         current medical seed against the active `prompt_adaptor` preprompts.
 
         Returns:
-            Tuple of `(mean_nolora_medical_logit, sample_nolora_attack, sample_blue_response)`.
+            Tuple of `(mean_nolora_composite_reward, sample_nolora_attack, sample_blue_response)`.
         """
+        g_nolora = max(1, self.config.group_size // 2)
         nolora_batch = self.models.generate_adversarial_attacks(
             medical_seed=medical_seed,
-            group_size=max(1, self.config.group_size // 2),
+            group_size=g_nolora,
             use_lora=False,
         )
         nolora_blue_responses = self.models.generate_blue_responses(
@@ -399,9 +400,18 @@ class AdversarialCoEvolutionOrchestrator:
         nolora_logits = self.evaluator.score_medical_advice_logit(
             nolora_blue_responses
         )
-        mean_logit = float(nolora_logits.mean().item())
+        nolora_logits_matrix = nolora_logits.view(len(preprompts), g_nolora)
+        nolora_relevance_scores = self.evaluator.score_seed_relevance_logit(
+            nolora_batch.texts, medical_seed
+        )
+        nolora_composite_rewards = self.evaluator.compute_red_composite_rewards(
+            red_attack_scores=nolora_logits_matrix.mean(dim=0),
+            red_relevance_scores=nolora_relevance_scores,
+            update_ema=False,
+        )
+        mean_reward = float(nolora_composite_rewards.mean().item())
         return (
-            mean_logit,
+            mean_reward,
             nolora_batch.texts[0],
             nolora_blue_responses[0],
         )
@@ -492,11 +502,14 @@ class AdversarialCoEvolutionOrchestrator:
                         pairwise=True,
                     )
 
-                    # 5. Score continuous rewards using the DeBERTa-v3 sidecar & benign utility scorer
+                    # 5. Score continuous rewards using the DeBERTa-v3 sidecar & similarity scorer
                     flat_attack_logits = self.evaluator.score_medical_advice_logit(
                         blue_attack_responses
                     )
                     attack_logits_matrix = flat_attack_logits.view(G, G)
+                    red_relevance_scores = self.evaluator.score_seed_relevance_logit(
+                        red_batch.texts, sample.medical_seed
+                    )
                     benign_utility_scores = self.evaluator.score_benign_utility(
                         blue_benign_responses, sample.benign_query
                     )
@@ -504,6 +517,7 @@ class AdversarialCoEvolutionOrchestrator:
                     reward_dict = self.evaluator.compute_rewards(
                         attack_logits_matrix=attack_logits_matrix,
                         benign_utility_scores=benign_utility_scores,
+                        red_relevance_scores=red_relevance_scores,
                     )
                     red_rewards = reward_dict["red_rewards"]
                     prompt_defense_scores = reward_dict["prompt_defense_scores"]

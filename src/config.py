@@ -304,8 +304,11 @@ class TrainingConfig:
     advantage_eps: float = 1e-6
     clip_eps: float = 0.2
 
-    # Composite reward weights & EMA std normalisation for the Prompt model
+    # Composite reward weights & EMA std normalisation for the Red and Prompt models
+    # R_red = red_attack_weight * (A_red / (sigma_atk_ema + eps)) + red_relevance_weight * (S_seed / (sigma_rel_ema + eps))
     # R_prompt = defense_weight * (D_prompt / (sigma_def_ema + eps)) + utility_weight * (U_benign / (sigma_util_ema + eps))
+    red_attack_weight: float = 1.0
+    red_relevance_weight: float = 1.0
     defense_weight: float = 1.0
     utility_weight: float = 0.6
     reward_ema_decay: float = 0.9

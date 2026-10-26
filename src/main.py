@@ -125,6 +125,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"Learning rate for red_adaptor (recommended: 1e-5 to 5e-5, default: {default_cfg.lr_red})",
     )
     parser.add_argument(
+        "--red-relevance-weight",
+        type=float,
+        default=default_cfg.red_relevance_weight,
+        help=f"Weight applied to the seed-scenario relevance logit in the Red composite reward (default: {default_cfg.red_relevance_weight})",
+    )
+    parser.add_argument(
         "--utility-weight",
         type=float,
         default=default_cfg.utility_weight,
@@ -235,6 +241,7 @@ def main() -> None:
         num_steps_explicit=num_steps_explicit,
         lr_prompt=args.lr_prompt,
         lr_red=args.lr_red,
+        red_relevance_weight=args.red_relevance_weight,
         utility_weight=args.utility_weight,
         prompt_kl_coef=args.prompt_kl_coef,
         red_kl_coef=args.red_kl_coef,

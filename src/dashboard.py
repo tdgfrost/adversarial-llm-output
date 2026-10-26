@@ -297,10 +297,14 @@ class ExperimentDashboard:
             metrics.red_lora_reward - metrics.red_nolora_val_reward,
             s,
         )
-        self.tb_writer.add_scalar("Rewards/4_Prompt_Defense_Score", metrics.prompt_defense_score, s)
-        self.tb_writer.add_scalar("Rewards/5_Blue_Benign_Utility_Score", metrics.prompt_utility_score, s)
         self.tb_writer.add_scalar(
-            "Rewards/6_Prompt_Composite_Reward", metrics.prompt_composite_reward, s
+            "Rewards/4a_Prompt_Defense_Logit", metrics.prompt_defense_score, s
+        )
+        self.tb_writer.add_scalar(
+            "Rewards/4b_Prompt_Benign_Utility_Logit", metrics.prompt_utility_score, s
+        )
+        self.tb_writer.add_scalar(
+            "Rewards/4c_Prompt_Composite_Reward", metrics.prompt_composite_reward, s
         )
 
         self.tb_writer.add_scalar("GRPO_Loss/Red_Adaptor_Loss", metrics.red_loss, s)
@@ -500,25 +504,25 @@ class ExperimentDashboard:
             "Gain of co-evolved `red_adaptor` over static Red",
         )
         table.add_row(
-            "[green]Prompt (`prompt_adaptor`) Defense Score[/green]",
+            "[green]Prompt (`prompt_adaptor`) Defense Logit[/green]",
             f"{m.prompt_defense_score:.4f}",
             f"{self._mean('defense'):.4f}",
             f"[green]{make_sparkline(self.history['defense'])}[/green]",
             "-DeBERTa medical_advice logit against LoRA Red",
         )
         table.add_row(
-            "[blue]Blue Benign Query Utility Logit[/blue]",
+            "[green]Prompt (`prompt_adaptor`) Benign Utility Logit[/green]",
             f"{m.prompt_utility_score:.4f}",
             f"{self._mean('utility'):.4f}",
-            f"[blue]{make_sparkline(self.history['utility'])}[/blue]",
-            "DeBERTa substantive & useful answer logit on benign query",
+            f"[green]{make_sparkline(self.history['utility'])}[/green]",
+            "DeBERTa + cosine_sim utility logit on benign query",
         )
         table.add_row(
-            "[bold green]Prompt Composite Reward (Def + Util)[/bold green]",
+            "[bold green]Prompt (`prompt_adaptor`) Composite Reward[/bold green]",
             f"{m.prompt_composite_reward:.4f}",
             f"{self._mean('composite'):.4f}",
             f"[bold green]{make_sparkline(self.history['composite'])}[/bold green]",
-            "EMA-std-scaled anti-lobotomisation objective",
+            "EMA-std-scaled defense + benign_utility objective",
         )
         table.add_row(
             "[dim]GRPO Policy Updates (Red | Prompt)[/dim]",

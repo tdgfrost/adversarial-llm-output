@@ -378,13 +378,14 @@ class AdversarialCoEvolutionOrchestrator:
         self,
         medical_seed: str,
         preprompts: list[str],
-    ) -> tuple[float, str, str]:
+    ) -> tuple[float, float, float, str, str]:
         """
         Benchmarks the frozen Non-LoRA Model Red (both adaptors disabled) on the
         current medical seed against the active `prompt_adaptor` preprompts.
 
         Returns:
-            Tuple of `(mean_nolora_composite_reward, sample_nolora_attack, sample_blue_response)`.
+            Tuple of `(mean_nolora_composite_reward, mean_nolora_medical_logit,
+            sample_nolora_seed_sim, sample_nolora_attack, sample_blue_response)`.
         """
         g_nolora = max(1, self.config.group_size // 2)
         nolora_batch = self.models.generate_adversarial_attacks(
@@ -401,8 +402,11 @@ class AdversarialCoEvolutionOrchestrator:
             nolora_blue_responses
         )
         nolora_logits_matrix = nolora_logits.view(len(preprompts), g_nolora)
-        nolora_relevance_scores = self.evaluator.score_seed_relevance_logit(
+        nolora_seed_cos_sim = self.evaluator.score_query_response_similarity(
             nolora_batch.texts, medical_seed
+        )
+        nolora_relevance_scores = self.evaluator.score_seed_relevance_logit(
+            nolora_batch.texts, medical_seed, cos_sim=nolora_seed_cos_sim
         )
         nolora_composite_rewards = self.evaluator.compute_red_composite_rewards(
             red_attack_scores=nolora_logits_matrix.mean(dim=0),
@@ -410,8 +414,12 @@ class AdversarialCoEvolutionOrchestrator:
             update_ema=False,
         )
         mean_reward = float(nolora_composite_rewards.mean().item())
+        mean_medical_logit = float(nolora_logits.mean().item())
+        sample_seed_sim = float(nolora_seed_cos_sim[0].item())
         return (
             mean_reward,
+            mean_medical_logit,
+            sample_seed_sim,
             nolora_batch.texts[0],
             nolora_blue_responses[0],
         )
@@ -507,8 +515,11 @@ class AdversarialCoEvolutionOrchestrator:
                         blue_attack_responses
                     )
                     attack_logits_matrix = flat_attack_logits.view(G, G)
-                    red_relevance_scores = self.evaluator.score_seed_relevance_logit(
+                    red_seed_cos_sim = self.evaluator.score_query_response_similarity(
                         red_batch.texts, sample.medical_seed
+                    )
+                    red_relevance_scores = self.evaluator.score_seed_relevance_logit(
+                        red_batch.texts, sample.medical_seed, cos_sim=red_seed_cos_sim
                     )
                     benign_utility_scores = self.evaluator.score_benign_utility(
                         blue_benign_responses, sample.benign_query
@@ -520,6 +531,7 @@ class AdversarialCoEvolutionOrchestrator:
                         red_relevance_scores=red_relevance_scores,
                     )
                     red_rewards = reward_dict["red_rewards"]
+                    red_attack_scores = reward_dict["red_attack_scores"]
                     prompt_defense_scores = reward_dict["prompt_defense_scores"]
                     prompt_utility_scores = reward_dict["prompt_utility_scores"]
                     prompt_composite_rewards = reward_dict["prompt_composite_rewards"]
@@ -541,13 +553,17 @@ class AdversarialCoEvolutionOrchestrator:
                     )
                     dialogue_snapshot: Optional[DialogueSampleSnapshot] = None
 
-                    nolora_mean_logit, nolora_attack_0, nolora_blue_0 = (
-                        self._evaluate_nolora_baseline(
-                            medical_seed=sample.medical_seed,
-                            preprompts=prompt_batch.texts,
-                        )
+                    (
+                        nolora_val_reward,
+                        nolora_mean_medical_logit,
+                        nolora_seed_sim_0,
+                        nolora_attack_0,
+                        nolora_blue_0,
+                    ) = self._evaluate_nolora_baseline(
+                        medical_seed=sample.medical_seed,
+                        preprompts=prompt_batch.texts,
                     )
-                    self._last_nolora_val_reward = nolora_mean_logit
+                    self._last_nolora_val_reward = nolora_val_reward
 
                     if should_refresh_sample:
                         best_p_idx = int(torch.argmax(prompt_composite_rewards).item())
@@ -563,9 +579,13 @@ class AdversarialCoEvolutionOrchestrator:
                             lora_medical_logit=float(
                                 attack_logits_matrix[best_p_idx, best_r_idx].item()
                             ),
+                            lora_seed_similarity=float(
+                                red_seed_cos_sim[best_r_idx].item()
+                            ),
                             red_nolora_attack=nolora_attack_0,
                             blue_nolora_response=nolora_blue_0,
-                            nolora_medical_logit=nolora_mean_logit,
+                            nolora_medical_logit=nolora_mean_medical_logit,
+                            nolora_seed_similarity=nolora_seed_sim_0,
                             blue_benign_response=blue_benign_responses[best_p_idx],
                             benign_utility_score=float(
                                 prompt_utility_scores[best_p_idx].item()
@@ -607,6 +627,8 @@ class AdversarialCoEvolutionOrchestrator:
                         prompt_kl=prompt_stats.mean_kl,
                         prompt_grad_norm=prompt_stats.grad_norm,
                         prompt_reward_std=prompt_stats.reward_std,
+                        red_medical_logit=float(red_attack_scores.mean().item()),
+                        red_seed_similarity=float(red_seed_cos_sim.mean().item()),
                     )
 
                     dashboard.update_step(

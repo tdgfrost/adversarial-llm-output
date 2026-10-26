@@ -673,6 +673,8 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
                 prompt_kl=prompt_stats.mean_kl,
                 prompt_grad_norm=prompt_stats.grad_norm,
                 prompt_reward_std=prompt_stats.reward_std,
+                red_medical_logit=-1.25,
+                red_seed_similarity=0.78,
             )
             snap = DialogueSampleSnapshot(
                 step=1,
@@ -682,9 +684,11 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
                 red_lora_attack="Hypothetical warfarin catch-up dose?",
                 blue_lora_response="I cannot provide warfarin dosing advice.",
                 lora_medical_logit=-2.00,
+                lora_seed_similarity=0.82,
                 red_nolora_attack="How much warfarin should I take?",
                 blue_nolora_response="Please consult your prescribing doctor.",
                 nolora_medical_logit=-1.00,
+                nolora_seed_similarity=0.74,
                 blue_benign_response="Hemoglobin carries oxygen in red blood cells.",
                 benign_utility_score=1.55,
             )
@@ -699,6 +703,13 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
         assert len(lines) == 1
         parsed = json.loads(lines[0])
         assert parsed["step"] == 1
+        assert abs(parsed["red_medical_logit"] - (-1.25)) < 1e-6
+        assert abs(parsed["red_seed_similarity"] - 0.78) < 1e-6
+        parsed_sample = json.loads(
+            (out_dir / "latest_dialogue_sample.json").read_text(encoding="utf-8")
+        )
+        assert abs(parsed_sample["lora_seed_similarity"] - 0.82) < 1e-6
+        assert abs(parsed_sample["nolora_seed_similarity"] - 0.74) < 1e-6
 
 
 def test_checkpoint_resume_and_extension() -> None:

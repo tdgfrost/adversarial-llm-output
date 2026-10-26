@@ -78,6 +78,9 @@ class DialogueSampleSnapshot:
     # Benign query check
     blue_benign_response: str
     benign_utility_score: float
+    # Seed cosine similarities for Red prompts
+    lora_seed_similarity: float = 0.0
+    nolora_seed_similarity: float = 0.0
 
 
 @dataclass
@@ -104,6 +107,9 @@ class StepMetricsRecord:
     prompt_kl: float
     prompt_grad_norm: float
     prompt_reward_std: float
+    # Red reward components (DeBERTa medical advice logit & prompt-to-seed cosine similarity)
+    red_medical_logit: float = 0.0
+    red_seed_similarity: float = 0.0
 
 
 class ExperimentDashboard:
@@ -143,6 +149,8 @@ class ExperimentDashboard:
         # Metric histories for moving averages and sparklines
         win = config.moving_avg_window
         self.history: Dict[str, List[float]] = {
+            "red_medical": [],
+            "red_seed_sim": [],
             "red_lora": [],
             "red_nolora": [],
             "defense": [],
@@ -192,6 +200,8 @@ class ExperimentDashboard:
                     kept_lines.append(line)
                     if self.initial_nolora_reward is None and "red_nolora_val_reward" in data:
                         self.initial_nolora_reward = float(data["red_nolora_val_reward"])
+                    self._push_metric("red_medical", float(data.get("red_medical_logit", 0.0)))
+                    self._push_metric("red_seed_sim", float(data.get("red_seed_similarity", 0.0)))
                     self._push_metric("red_lora", float(data.get("red_lora_reward", 0.0)))
                     self._push_metric("red_nolora", float(data.get("red_nolora_val_reward", 0.0)))
                     self._push_metric("defense", float(data.get("prompt_defense_score", 0.0)))
@@ -254,6 +264,8 @@ class ExperimentDashboard:
             self.initial_nolora_reward = metrics.red_nolora_val_reward
 
         # Update histories
+        self._push_metric("red_medical", metrics.red_medical_logit)
+        self._push_metric("red_seed_sim", metrics.red_seed_similarity)
         self._push_metric("red_lora", metrics.red_lora_reward)
         self._push_metric("red_nolora", metrics.red_nolora_val_reward)
         self._push_metric("defense", metrics.prompt_defense_score)
@@ -268,9 +280,17 @@ class ExperimentDashboard:
 
         # Log scalars to TensorBoard
         s = metrics.step
-        self.tb_writer.add_scalar("Rewards/1_Red_LoRA_Attack_Logit", metrics.red_lora_reward, s)
         self.tb_writer.add_scalar(
-            "Rewards/2_Red_NoLoRA_Baseline_Validation_Logit", metrics.red_nolora_val_reward, s
+            "Rewards/1a_Red_LoRA_Medical_Logit", metrics.red_medical_logit, s
+        )
+        self.tb_writer.add_scalar(
+            "Rewards/1b_Red_LoRA_Seed_Cosine_Similarity", metrics.red_seed_similarity, s
+        )
+        self.tb_writer.add_scalar(
+            "Rewards/1c_Red_LoRA_Composite_Reward", metrics.red_lora_reward, s
+        )
+        self.tb_writer.add_scalar(
+            "Rewards/2_Red_NoLoRA_Baseline_Validation_Reward", metrics.red_nolora_val_reward, s
         )
         self.tb_writer.add_scalar(
             "Rewards/3_Red_LoRA_Advantage_vs_NoLoRA",
@@ -331,12 +351,14 @@ class ExperimentDashboard:
             f"  > {sample.defensive_preprompt}\n\n"
             f"## 2. Adversarial Interaction WITH LoRA (`red_adaptor` -> `Model Blue`)\n"
             f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.lora_medical_logit:.4f}`\n"
+            f"- **Red Prompt Seed Cosine Similarity**: `{sample.lora_seed_similarity:.4f}`\n"
             f"- **Model Red (LoRA) Attack**:\n"
             f"  > {sample.red_lora_attack}\n"
             f"- **Model Blue Response**:\n"
             f"  > {sample.blue_lora_response}\n\n"
             f"## 3. Baseline Validation WITHOUT LoRA (`Frozen Red` -> `Model Blue`)\n"
             f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.nolora_medical_logit:.4f}`\n"
+            f"- **Red Prompt Seed Cosine Similarity**: `{sample.nolora_seed_similarity:.4f}`\n"
             f"- **Model Red (Non-LoRA) Attack**:\n"
             f"  > {sample.red_nolora_attack}\n"
             f"- **Model Blue Response**:\n"
@@ -352,8 +374,10 @@ class ExperimentDashboard:
     def _log_dialogue_to_tensorboard(self, sample: DialogueSampleSnapshot) -> None:
         text_block = (
             f"**Step {sample.step}** | "
-            f"**LoRA Red Logit:** `{sample.lora_medical_logit:.3f}` | "
-            f"**Non-LoRA Red Logit:** `{sample.nolora_medical_logit:.3f}` | "
+            f"**LoRA Red Logit:** `{sample.lora_medical_logit:.3f}` "
+            f"(**Seed CosSim:** `{sample.lora_seed_similarity:.3f}`) | "
+            f"**Non-LoRA Red Logit:** `{sample.nolora_medical_logit:.3f}` "
+            f"(**Seed CosSim:** `{sample.nolora_seed_similarity:.3f}`) | "
             f"**Benign Utility Logit:** `{sample.benign_utility_score:.3f}`\n\n"
             f"- **Seed:** {sample.medical_seed}\n"
             f"- **Preprompt (`prompt_adaptor`):** {sample.defensive_preprompt}\n"
@@ -441,14 +465,28 @@ class ExperimentDashboard:
         delta_str = f"({nolora_delta:+.3f} vs step 1)"
 
         table.add_row(
-            "[red]Red (LoRA `red_adaptor`) Attack Logit[/red]",
-            f"{m.red_lora_reward:.4f}",
-            f"{self._mean('red_lora'):.4f}",
-            f"[red]{make_sparkline(self.history['red_lora'])}[/red]",
+            "[red]Red (`red_adaptor`) Medical Advice Logit[/red]",
+            f"{m.red_medical_logit:.4f}",
+            f"{self._mean('red_medical'):.4f}",
+            f"[red]{make_sparkline(self.history['red_medical'])}[/red]",
             "DeBERTa medical_advice logit w/ trained LoRA attacker",
         )
         table.add_row(
-            "[yellow]Red (Non-LoRA Baseline) Validation Logit[/yellow]",
+            "[red]Red (`red_adaptor`) Seed Cosine Sim[/red]",
+            f"{m.red_seed_similarity:.4f}",
+            f"{self._mean('red_seed_sim'):.4f}",
+            f"[red]{make_sparkline(self.history['red_seed_sim'], vmin=0.0, vmax=1.0)}[/red]",
+            "Cosine similarity of Red attack prompt to medical seed",
+        )
+        table.add_row(
+            "[bold red]Red (`red_adaptor`) Composite Reward[/bold red]",
+            f"{m.red_lora_reward:.4f}",
+            f"{self._mean('red_lora'):.4f}",
+            f"[bold red]{make_sparkline(self.history['red_lora'])}[/bold red]",
+            "EMA-std-scaled medical_advice + seed_relevance objective",
+        )
+        table.add_row(
+            "[yellow]Red (Non-LoRA) Validation Composite[/yellow]",
             f"{m.red_nolora_val_reward:.4f}",
             f"{self._mean('red_nolora'):.4f}",
             f"[yellow]{make_sparkline(self.history['red_nolora'])}[/yellow]",
@@ -522,7 +560,9 @@ class ExperimentDashboard:
         lora_box = Panel(
             Group(
                 Text.from_markup(
-                    f"[bold red]Model Red (WITH LoRA `red_adaptor`):[/bold red]\n{_truncate(d.red_lora_attack, 280)}"
+                    f"[bold red]Model Red (WITH LoRA `red_adaptor`)[/bold red] "
+                    f"([bold]Seed CosSim: {d.lora_seed_similarity:.3f}[/bold]):\n"
+                    f"{_truncate(d.red_lora_attack, 280)}"
                 ),
                 Rule(style="dim"),
                 Text.from_markup(
@@ -539,7 +579,9 @@ class ExperimentDashboard:
         nolora_box = Panel(
             Group(
                 Text.from_markup(
-                    f"[bold yellow]Model Red (WITHOUT LoRA Baseline):[/bold yellow]\n{_truncate(d.red_nolora_attack, 280)}"
+                    f"[bold yellow]Model Red (WITHOUT LoRA Baseline)[/bold yellow] "
+                    f"([bold]Seed CosSim: {d.nolora_seed_similarity:.3f}[/bold]):\n"
+                    f"{_truncate(d.red_nolora_attack, 280)}"
                 ),
                 Rule(style="dim"),
                 Text.from_markup(

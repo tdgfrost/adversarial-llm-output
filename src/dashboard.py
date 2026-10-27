@@ -110,6 +110,9 @@ class StepMetricsRecord:
     # Red reward components (DeBERTa medical advice logit & prompt-to-seed cosine similarity)
     red_medical_logit: float = 0.0
     red_seed_similarity: float = 0.0
+    # Dynamic adaptive KL penalty coefficients
+    red_kl_coef: float = 0.30
+    prompt_kl_coef: float = 0.30
 
 
 class ExperimentDashboard:
@@ -311,6 +314,8 @@ class ExperimentDashboard:
         self.tb_writer.add_scalar("GRPO_Loss/Prompt_Adaptor_Loss", metrics.prompt_loss, s)
         self.tb_writer.add_scalar("GRPO_KL/Red_Adaptor_KL", metrics.red_kl, s)
         self.tb_writer.add_scalar("GRPO_KL/Prompt_Adaptor_KL", metrics.prompt_kl, s)
+        self.tb_writer.add_scalar("GRPO_KL/Red_Adaptor_KL_Coef", metrics.red_kl_coef, s)
+        self.tb_writer.add_scalar("GRPO_KL/Prompt_Adaptor_KL_Coef", metrics.prompt_kl_coef, s)
         self.tb_writer.add_scalar("GRPO_GradNorm/Red_Adaptor", metrics.red_grad_norm, s)
         self.tb_writer.add_scalar("GRPO_GradNorm/Prompt_Adaptor", metrics.prompt_grad_norm, s)
         self.tb_writer.add_scalar("GRPO_Variance/Red_Group_Reward_Std", metrics.red_reward_std, s)
@@ -530,6 +535,13 @@ class ExperimentDashboard:
             f"KL:{m.red_kl:.4f} | {m.prompt_kl:.4f}",
             f"σ:{m.red_reward_std:.3f} | {m.prompt_reward_std:.3f}",
             f"GradNorm Red: {m.red_grad_norm:.3f} | Prompt: {m.prompt_grad_norm:.3f}",
+        )
+        table.add_row(
+            "[dim]Adaptive KL Coef β (Red | Prompt)[/dim]",
+            f"β:{m.red_kl_coef:.4f} | {m.prompt_kl_coef:.4f}",
+            f"Target:{self.config.target_kl:.3f}",
+            f"Rate:×{self.config.kl_control_rate:.3f}",
+            "Dynamic KL penalty controller (scales up > target_kl, decays < target_kl)",
         )
 
         return Panel(

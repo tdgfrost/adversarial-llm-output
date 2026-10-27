@@ -149,6 +149,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"KL regularisation coefficient for red_adaptor against the frozen reference base model (default: {default_cfg.red_kl_coef})",
     )
     parser.add_argument(
+        "--target-kl",
+        type=float,
+        default=default_cfg.target_kl,
+        help=f"Target mean KL divergence threshold for the adaptive KL controller (default: {default_cfg.target_kl})",
+    )
+    parser.add_argument(
+        "--kl-control-rate",
+        type=float,
+        default=default_cfg.kl_control_rate,
+        help=f"Multiplicative adjustment factor for the adaptive KL controller (default: {default_cfg.kl_control_rate})",
+    )
+    parser.add_argument(
         "--sample-interval",
         type=int,
         default=default_cfg.sample_refresh_interval,
@@ -245,6 +257,8 @@ def main() -> None:
         utility_weight=args.utility_weight,
         prompt_kl_coef=args.prompt_kl_coef,
         red_kl_coef=args.red_kl_coef,
+        target_kl=args.target_kl,
+        kl_control_rate=args.kl_control_rate,
         sample_refresh_interval=args.sample_interval,
         checkpoint_interval=args.checkpoint_interval,
         output_dir=args.output_dir,

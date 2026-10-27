@@ -40,12 +40,14 @@ class GRPOUpdateStats:
     reward_mean: float
     reward_std: float
     advantages: List[float]
+    kl_coef: float = 0.0
 
 
 class DualAgentGRPOTrainer:
     """
     Manages the separate AdamW optimisers, FP16 mixed-precision GradScaler,
-    and interleaved GRPO policy updates for `red_adaptor` and `prompt_adaptor`.
+    adaptive KL penalty coefficients, and interleaved GRPO policy updates
+    for `red_adaptor` and `prompt_adaptor`.
     """
 
     def __init__(
@@ -57,6 +59,8 @@ class DualAgentGRPOTrainer:
         self.config = config
         self.models = models
         self.device = device
+        self.prompt_kl_coef: float = float(config.prompt_kl_coef)
+        self.red_kl_coef: float = float(config.red_kl_coef)
 
         # Separate optimisers ensure independent Adam momentum buffers for each agent
         red_params = self.models.get_adaptor_parameters(
@@ -217,10 +221,11 @@ class DualAgentGRPOTrainer:
 
         # Select the correct KL penalty for the active adaptor
         prompt_name = getattr(self.config.model, "prompt_adaptor_name", "prompt_adaptor")
+        is_prompt = adaptor_name == prompt_name
         active_kl_coef = (
-            self.config.prompt_kl_coef
-            if adaptor_name == prompt_name
-            else self.config.red_kl_coef
+            float(getattr(self, "prompt_kl_coef", self.config.prompt_kl_coef))
+            if is_prompt
+            else float(getattr(self, "red_kl_coef", self.config.red_kl_coef))
         )
 
         total_loss_val = 0.0
@@ -279,6 +284,28 @@ class DualAgentGRPOTrainer:
         self.scaler.step(optimiser)
         self.scaler.update()
 
+        # 6. Dynamically adjust the active KL penalty coefficient via the adaptive KL controller
+        target_kl = float(getattr(self.config, "target_kl", 0.10))
+        kl_control_rate = float(getattr(self.config, "kl_control_rate", 1.05))
+        updated_kl_coef = active_kl_coef
+        if target_kl > 0.0 and kl_control_rate > 0.0:
+            multiplier = (
+                kl_control_rate
+                if kl_control_rate >= 1.0
+                else (1.0 + kl_control_rate)
+            )
+            if total_kl_val > target_kl:
+                updated_kl_coef = min(10.0, active_kl_coef * multiplier)
+            elif total_kl_val < target_kl:
+                updated_kl_coef = max(1e-4, active_kl_coef / multiplier)
+
+        if is_prompt:
+            self.prompt_kl_coef = float(updated_kl_coef)
+            self.config.prompt_kl_coef = float(updated_kl_coef)
+        else:
+            self.red_kl_coef = float(updated_kl_coef)
+            self.config.red_kl_coef = float(updated_kl_coef)
+
         return GRPOUpdateStats(
             loss=total_loss_val,
             policy_objective=total_policy_obj_val,
@@ -287,6 +314,7 @@ class DualAgentGRPOTrainer:
             reward_mean=float(rewards.float().mean().item()),
             reward_std=float(rewards.float().std(unbiased=False).item()),
             advantages=[float(a) for a in advantages.detach().cpu().tolist()],
+            kl_coef=float(updated_kl_coef),
         )
 
     _step_adapter = _step_adaptor
@@ -330,17 +358,19 @@ class DualAgentGRPOTrainer:
     update_prompt_adapter = update_prompt_adaptor
 
     def state_dict(self) -> dict:
-        """Serialises optimiser and GradScaler states for checkpointing."""
+        """Serialises optimiser, GradScaler, and adaptive KL controller states for checkpointing."""
         return {
             "optimiser_red": self.optimiser_red.state_dict(),
             "optimiser_prompt": self.optimiser_prompt.state_dict(),
             "optimizer_red": self.optimiser_red.state_dict(),
             "optimizer_prompt": self.optimiser_prompt.state_dict(),
             "scaler": self.scaler.state_dict(),
+            "prompt_kl_coef": float(getattr(self, "prompt_kl_coef", self.config.prompt_kl_coef)),
+            "red_kl_coef": float(getattr(self, "red_kl_coef", self.config.red_kl_coef)),
         }
 
     def load_state_dict(self, state: dict) -> None:
-        """Restores optimiser and GradScaler states when resuming/extending a run."""
+        """Restores optimiser, GradScaler, and adaptive KL controller states when resuming/extending a run."""
         red_state = state.get("optimiser_red") or state.get("optimizer_red")
         if red_state is not None:
             self.optimiser_red.load_state_dict(red_state)
@@ -349,3 +379,9 @@ class DualAgentGRPOTrainer:
             self.optimiser_prompt.load_state_dict(prompt_state)
         if "scaler" in state and state["scaler"]:
             self.scaler.load_state_dict(state["scaler"])
+        if "prompt_kl_coef" in state and state["prompt_kl_coef"] is not None:
+            self.prompt_kl_coef = float(state["prompt_kl_coef"])
+            self.config.prompt_kl_coef = self.prompt_kl_coef
+        if "red_kl_coef" in state and state["red_kl_coef"] is not None:
+            self.red_kl_coef = float(state["red_kl_coef"])
+            self.config.red_kl_coef = self.red_kl_coef

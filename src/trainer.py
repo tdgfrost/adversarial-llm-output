@@ -629,6 +629,8 @@ class AdversarialCoEvolutionOrchestrator:
                         prompt_reward_std=prompt_stats.reward_std,
                         red_medical_logit=float(red_attack_scores.mean().item()),
                         red_seed_similarity=float(red_seed_cos_sim.mean().item()),
+                        red_kl_coef=red_stats.kl_coef,
+                        prompt_kl_coef=prompt_stats.kl_coef,
                     )
 
                     dashboard.update_step(

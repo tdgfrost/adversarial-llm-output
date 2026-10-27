@@ -591,8 +591,16 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
         )
 
         # 1. Step red_adaptor
+        initial_red_kl_coef = grpo_trainer.red_kl_coef
+        initial_prompt_kl_coef = grpo_trainer.prompt_kl_coef
         red_rewards = torch.tensor([0.12, 0.45, 0.28, 0.81], dtype=torch.float32, device=device)
         red_stats = grpo_trainer.update_red_adaptor(dummy_batch, red_rewards)
+
+        # At initialisation, LoRA B weights are zero so mean_kl == 0.0 < target_kl (0.10),
+        # which causes the adaptive KL controller to decay red_kl_coef by kl_control_rate
+        assert abs(grpo_trainer.red_kl_coef - (initial_red_kl_coef / cfg.kl_control_rate)) < 1e-6
+        assert abs(red_stats.kl_coef - grpo_trainer.red_kl_coef) < 1e-6
+        assert abs(grpo_trainer.prompt_kl_coef - initial_prompt_kl_coef) < 1e-6
 
         red_after_step1 = [
             p.detach().clone() for p in models_wrapper.get_adaptor_parameters("red_adaptor")
@@ -608,9 +616,20 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
             "prompt_adaptor parameters must NOT change during update_red_adaptor"
         )
 
+        # Verify adaptive KL controller scales red_kl_coef up when mean_kl > target_kl
+        cfg.target_kl = 1e-12
+        kl_before_scale_up = grpo_trainer.red_kl_coef
+        red_stats_up = grpo_trainer.update_red_adaptor(dummy_batch, red_rewards)
+        assert red_stats_up.mean_kl > cfg.target_kl
+        assert abs(grpo_trainer.red_kl_coef - (kl_before_scale_up * cfg.kl_control_rate)) < 1e-6
+        assert abs(red_stats_up.kl_coef - grpo_trainer.red_kl_coef) < 1e-6
+        cfg.target_kl = 0.10
+
         # 2. Step prompt_adaptor
         prompt_rewards = torch.tensor([1.35, 0.92, 1.18, 0.64], dtype=torch.float32, device=device)
         prompt_stats = grpo_trainer.update_prompt_adaptor(dummy_batch, prompt_rewards)
+        assert abs(grpo_trainer.prompt_kl_coef - (initial_prompt_kl_coef / cfg.kl_control_rate)) < 1e-6
+        assert abs(prompt_stats.kl_coef - grpo_trainer.prompt_kl_coef) < 1e-6
 
         # Verify zero-variance rewards (std_r < 1e-3) zero out advantages
         collapsed_rewards = torch.tensor([0.5000, 0.5002, 0.4999, 0.5001], dtype=torch.float32, device=device)
@@ -675,6 +694,8 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
                 prompt_reward_std=prompt_stats.reward_std,
                 red_medical_logit=-1.25,
                 red_seed_similarity=0.78,
+                red_kl_coef=red_stats.kl_coef,
+                prompt_kl_coef=prompt_stats.kl_coef,
             )
             snap = DialogueSampleSnapshot(
                 step=1,
@@ -705,6 +726,8 @@ def test_dual_lora_grpo_and_dashboard_end_to_end() -> None:
         assert parsed["step"] == 1
         assert abs(parsed["red_medical_logit"] - (-1.25)) < 1e-6
         assert abs(parsed["red_seed_similarity"] - 0.78) < 1e-6
+        assert abs(parsed["red_kl_coef"] - red_stats.kl_coef) < 1e-6
+        assert abs(parsed["prompt_kl_coef"] - prompt_stats.kl_coef) < 1e-6
         parsed_sample = json.loads(
             (out_dir / "latest_dialogue_sample.json").read_text(encoding="utf-8")
         )
@@ -799,6 +822,8 @@ def test_checkpoint_resume_and_extension() -> None:
         )
         orch1.grpo.update_red_adaptor(dummy_batch, torch.tensor([0.2, 0.8], device=device))
         orch1.grpo.update_prompt_adaptor(dummy_batch, torch.tensor([1.2, 0.6], device=device))
+        orch1.grpo.red_kl_coef = 0.42
+        orch1.grpo.prompt_kl_coef = 0.18
         orch1._last_successful_attack = "Hypothetical pharmacology case study framing"
         orch1._recent_successful_attacks = [
             "Urgent triage override framing",
@@ -861,7 +886,11 @@ def test_checkpoint_resume_and_extension() -> None:
             assert p_loaded.dtype == torch.float32
             assert torch.allclose(p_saved, p_loaded)
 
-        # Verify dataset and evaluator EMA state continue from step 3 identically
+        # Verify dataset, adaptive KL coefficients, and evaluator EMA state continue from step 3 identically
+        assert abs(orch2.grpo.red_kl_coef - 0.42) < 1e-6
+        assert abs(orch2.grpo.prompt_kl_coef - 0.18) < 1e-6
+        assert abs(orch2.config.red_kl_coef - 0.42) < 1e-6
+        assert abs(orch2.config.prompt_kl_coef - 0.18) < 1e-6
         assert orch2.evaluator.ema_red_attack_std == 1.15
         assert orch2.evaluator.ema_red_relevance_std == 0.95
         assert orch2.evaluator.ema_defense_std == 1.25
@@ -945,6 +974,8 @@ def test_cli_defaults_match_config() -> None:
     assert args.utility_weight == cfg.utility_weight
     assert args.prompt_kl_coef == cfg.prompt_kl_coef
     assert args.red_kl_coef == cfg.red_kl_coef
+    assert args.target_kl == cfg.target_kl
+    assert args.kl_control_rate == cfg.kl_control_rate
     assert args.sample_interval == cfg.sample_refresh_interval
     assert args.checkpoint_interval == cfg.checkpoint_interval
     assert args.preprompt_max_tokens == cfg.tokens.preprompt_max_new_tokens

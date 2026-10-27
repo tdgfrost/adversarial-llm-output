@@ -60,6 +60,12 @@ def test_dataset_completeness_and_sampling() -> None:
     # Hypothesis tokens plus the question-conditioned utility premise overhead
     # (`UTILITY_PREMISE_TEMPLATE` scaffold + the longest benign query)
     assert cfg.tokens.evaluator_max_length == int(256 * 1.5) + 32 + 9 + 38 == 463
+    assert 5 <= len(cfg.model.evaluator_nli_hypotheses) <= 10
+    assert len(set(cfg.model.evaluator_nli_hypotheses)) == len(cfg.model.evaluator_nli_hypotheses)
+    assert cfg.model.evaluator_nli_hypothesis in cfg.model.evaluator_nli_hypotheses
+    assert 5 <= len(cfg.model.utility_nli_hypotheses) <= 10
+    assert len(set(cfg.model.utility_nli_hypotheses)) == len(cfg.model.utility_nli_hypotheses)
+    assert cfg.model.utility_nli_hypothesis in cfg.model.utility_nli_hypotheses
 
     # Custom independent token limits should automatically update dependent token limits
     custom_tokens = TokenCeilingConfig(
@@ -229,7 +235,8 @@ def test_reward_and_utility_scoring_math() -> None:
 
     utilities = evaluator.score_benign_utility(responses_4, benign_query)
     assert utilities.shape == (4,)
-    assert captured_utility["hypotheses"] == [cfg.model.utility_nli_hypothesis] * 4
+    assert captured_utility["hypotheses"][0] in cfg.model.utility_nli_hypotheses
+    assert captured_utility["hypotheses"] == [evaluator.last_sampled_utility_hypothesis] * 4
     assert captured_utility["premises"] == [
         format_utility_premise(benign_query, helpful_resp),
         format_utility_premise(benign_query, refusal_resp),
@@ -445,9 +452,21 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
     assert float(logits[0]) == 4.0, f"Advice-like premise raw logit mismatch: {logits[0]}"
     assert float(logits[1]) == -4.0, f"Non-advice premise raw logit mismatch: {logits[1]}"
     assert captured["premises"] == ["Take 500mg now.", "..."]
-    assert captured["hypotheses"] == [cfg.model.evaluator_nli_hypothesis] * 2
+    assert captured["hypotheses"][0] in cfg.model.evaluator_nli_hypotheses
+    assert captured["hypotheses"] == [scorer.last_sampled_hypothesis] * 2
     assert captured["kwargs"]["max_length"] == cfg.tokens.evaluator_max_length
     assert captured["kwargs"]["truncation"] == "only_first"
+
+    # Verify batch-level random sampling draws diverse hypothesis strings across batches
+    sampled_med_hypotheses = set()
+    for _ in range(32):
+        scorer.score_medical_advice_logit(["  Take 500mg now.  ", ""])
+        assert len(set(captured["hypotheses"])) == 1
+        assert captured["hypotheses"][0] in cfg.model.evaluator_nli_hypotheses
+        sampled_med_hypotheses.add(captured["hypotheses"][0])
+    assert len(sampled_med_hypotheses) > 1, (
+        "Expected multiple lexically diverse hypotheses to be sampled across batches"
+    )
 
     assert scorer.score_medical_advice_logit([]).shape == (0,)
 

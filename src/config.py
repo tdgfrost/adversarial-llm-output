@@ -299,8 +299,8 @@ class TrainingConfig:
 
     # GRPO policy optimisation settings
     grpo_micro_batch_size: int = 2
-    prompt_kl_coef: float = 0.20
-    red_kl_coef: float = 0.20
+    prompt_kl_coef: float = 0.30
+    red_kl_coef: float = 0.30
     advantage_eps: float = 1e-6
     clip_eps: float = 0.2
 

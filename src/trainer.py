@@ -92,10 +92,11 @@ class AdversarialCoEvolutionOrchestrator:
                 f"{utility_report.summary()}"
             )
 
+        ensemble_models_str = ", ".join(self.config.model.active_evaluator_model_ids)
         console = Console()
         console.print(
             Panel(
-                f"[bold white]NLI Model:[/bold white] {self.config.model.evaluator_model_id}\n"
+                f"[bold white]NLI Ensemble ({len(self.config.model.active_evaluator_model_ids)}):[/bold white] {ensemble_models_str}\n"
                 f"[bold white]Similarity Model:[/bold white] {self.config.model.similarity_model_id}\n\n"
                 f"[bold white]Medical Advice Hypothesis:[/bold white] {self.evaluator.hypothesis}\n"
                 f"{report.summary()}"

@@ -63,8 +63,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=str,
         default=default_model.evaluator_model_id,
         help=(
-            "Hugging Face model ID for the zero-shot NLI sidecar classifier "
+            "Hugging Face model ID for the primary zero-shot NLI sidecar classifier "
             f"(default: {default_model.evaluator_model_id})"
+        ),
+    )
+    parser.add_argument(
+        "--evaluator-ensemble-size",
+        type=int,
+        choices=[1, 2, 3],
+        default=default_model.evaluator_ensemble_size,
+        help=(
+            "Number of frozen NLI hypothesis sidecar models in the ensemble (1, 2, or 3; "
+            f"default: {default_model.evaluator_ensemble_size})"
         ),
     )
     parser.add_argument(
@@ -240,6 +250,7 @@ def main() -> None:
     model_cfg = ModelConfig(
         base_model_id=args.base_model,
         evaluator_model_id=args.evaluator_model,
+        evaluator_ensemble_size=args.evaluator_ensemble_size,
         similarity_model_id=args.similarity_model,
         use_fp16=(device.type in ("cuda", "mps")),
     )

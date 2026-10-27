@@ -31,7 +31,7 @@ from transformers import (
     Qwen2Config,
 )
 
-from src.config import TokenCeilingConfig, TrainingConfig, format_utility_premise
+from src.config import ModelConfig, TokenCeilingConfig, TrainingConfig, format_utility_premise
 from src.main import parse_args
 from src.dashboard import (
     DialogueSampleSnapshot,
@@ -469,6 +469,77 @@ def test_nli_label_resolution_and_pair_scoring() -> None:
     )
 
     assert scorer.score_medical_advice_logit([]).shape == (0,)
+
+    # Verify NLI ensemble configuration (1, 2, or 3 models; default 3) and logit averaging
+    assert cfg.model.evaluator_ensemble_size == 3
+    assert len(cfg.model.active_evaluator_model_ids) == 3
+    assert len(ModelConfig(evaluator_ensemble_size=1).active_evaluator_model_ids) == 1
+    assert len(ModelConfig(evaluator_ensemble_size=2).active_evaluator_model_ids) == 2
+    assert len(ModelConfig(evaluator_ensemble_size=3).active_evaluator_model_ids) == 3
+    try:
+        ModelConfig(evaluator_ensemble_size=4)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("evaluator_ensemble_size outside {1, 2, 3} must raise ValueError")
+
+    # Simulate a 3-model ensemble:
+    # 1. DeBERTa-v3-zeroshot: {0: "entailment", 1: "not_entailment"} -> entail_index = 0
+    # 2. RoBERTa-large-MNLI:  {0: "CONTRADICTION", 1: "NEUTRAL", 2: "ENTAILMENT"} -> entail_index = 2
+    # 3. BART-large-MNLI:     {0: "contradiction", 1: "neutral", 2: "entailment"} -> entail_index = 2
+    ens_ev = make_evaluator({0: "entailment", 1: "not_entailment"})
+    m_deberta = SimpleNamespace(
+        config=SimpleNamespace(id2label={0: "entailment", 1: "not_entailment"}, num_labels=2),
+        __call__=lambda **enc: SimpleNamespace(
+            logits=torch.tensor([[3.0, -3.0], [-3.0, 3.0]], dtype=torch.float32)
+        ),
+    )
+    m_roberta = SimpleNamespace(
+        config=SimpleNamespace(
+            id2label={0: "CONTRADICTION", 1: "NEUTRAL", 2: "ENTAILMENT"}, num_labels=3
+        ),
+        __call__=lambda **enc: SimpleNamespace(
+            logits=torch.tensor([[-2.0, 0.0, 4.5], [2.0, 0.0, -4.5]], dtype=torch.float32)
+        ),
+    )
+    m_bart = SimpleNamespace(
+        config=SimpleNamespace(
+            id2label={0: "contradiction", 1: "neutral", 2: "entailment"}, num_labels=3
+        ),
+        __call__=lambda **enc: SimpleNamespace(
+            logits=torch.tensor([[-1.5, 0.0, 1.5], [1.5, 0.0, -1.5]], dtype=torch.float32)
+        ),
+    )
+    ens_captured_hyps: list[list[str]] = []
+
+    def make_ens_tok():
+        def _tok(premises, hypotheses, **kwargs):
+            ens_captured_hyps.append(list(hypotheses))
+            return _Encoding(batch=len(premises))
+
+        return _tok
+
+    ens_ev.models = [
+        lambda **enc: m_deberta.__call__(**enc),
+        lambda **enc: m_roberta.__call__(**enc),
+        lambda **enc: m_bart.__call__(**enc),
+    ]
+    ens_ev.tokenizers = [make_ens_tok(), make_ens_tok(), make_ens_tok()]
+    ens_ev.entail_indices = [
+        ens_ev._resolve_nli_label_indices(m_deberta)[0],
+        ens_ev._resolve_nli_label_indices(m_roberta)[0],
+        ens_ev._resolve_nli_label_indices(m_bart)[0],
+    ]
+    assert ens_ev.entail_indices == [0, 2, 2]
+
+    ens_logits = ens_ev.score_medical_advice_logit(["Take 500mg now.", "Please see a doctor."])
+    # Expected average across the 3 models:
+    # item 0: (3.0 + 4.5 + 1.5) / 3 = 3.0
+    # item 1: (-3.0 + (-4.5) + (-1.5)) / 3 = -3.0
+    assert torch.allclose(ens_logits, torch.tensor([3.0, -3.0]))
+    assert len(ens_captured_hyps) == 3
+    assert ens_captured_hyps[0] == ens_captured_hyps[1] == ens_captured_hyps[2]
+    assert ens_captured_hyps[0][0] in cfg.model.evaluator_nli_hypotheses
 
 
 def test_calibration_sanity_check_separates_labels() -> None:
@@ -981,6 +1052,7 @@ def test_cli_defaults_match_config() -> None:
 
     assert args.base_model == cfg.model.base_model_id
     assert args.evaluator_model == cfg.model.evaluator_model_id
+    assert args.evaluator_ensemble_size == cfg.model.evaluator_ensemble_size == 3
     assert args.similarity_model == cfg.model.similarity_model_id
     assert args.num_steps == cfg.num_steps
     assert args.extend_steps == cfg.extend_steps

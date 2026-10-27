@@ -441,7 +441,7 @@ class ExperimentDashboard:
         grid.add_column(ratio=1)
         grid.add_row(
             f"[bold white]Hardware:[/bold white] {self._device_description()}",
-            f"[bold white]Base / Sidecar:[/bold white] {self.config.model.base_model_id} + DeBERTa-v3",
+            f"[bold white]Base / Sidecar:[/bold white] {self.config.model.base_model_id} + {len(self.config.model.active_evaluator_model_ids)}x NLI Ensemble",
         )
         grid.add_row(
             f"[bold white]Results Mount:[/bold white] {self.config.output_path}",

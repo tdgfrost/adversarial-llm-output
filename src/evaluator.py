@@ -132,23 +132,47 @@ class MedicalIntentEvaluator:
         self.ema_defense_std: Optional[float] = None
         self.ema_utility_std: Optional[float] = None
 
-        model_id = config.model.evaluator_model_id
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        # DebertaV2 uses disentangled relative attention, which requires
-        # attn_implementation="eager" and FP32 precision for stable logits.
-        self.model = AutoModelForSequenceClassification.from_pretrained(
-            model_id,
-            dtype=torch.float32,
-            attn_implementation=config.model.evaluator_attn_implementation,
-        ).to(self.device)
+        self.model_ids: List[str] = list(
+            getattr(
+                config.model,
+                "active_evaluator_model_ids",
+                (config.model.evaluator_model_id,),
+            )
+        )
+        self.tokenizers: List[Any] = []
+        self.models: List[Any] = []
+        self.entail_indices: List[int] = []
+        self.contradiction_indices_list: List[List[int]] = []
 
-        # Freeze the evaluator strictly for inference during GRPO co-evolution
-        self.model.eval()
-        for param in self.model.parameters():
-            param.requires_grad = False
+        for model_id in self.model_ids:
+            tok = AutoTokenizer.from_pretrained(model_id)
+            # DebertaV2 uses disentangled relative attention, which requires
+            # attn_implementation="eager" and FP32 precision for stable logits.
+            mdl = AutoModelForSequenceClassification.from_pretrained(
+                model_id,
+                dtype=torch.float32,
+                attn_implementation=config.model.evaluator_attn_implementation,
+            ).to(self.device)
+
+            # Freeze each NLI sidecar strictly for inference during GRPO co-evolution
+            mdl.eval()
+            for param in mdl.parameters():
+                param.requires_grad = False
+
+            entail_idx, contra_indices = self._resolve_nli_label_indices(mdl)
+            self.tokenizers.append(tok)
+            self.models.append(mdl)
+            self.entail_indices.append(entail_idx)
+            self.contradiction_indices_list.append(contra_indices)
+
+        # Primary NLI model aliases for single-model compatibility
+        self.tokenizer = self.tokenizers[0]
+        self.model = self.models[0]
+        self.entail_index = self.entail_indices[0]
+        self.contradiction_indices = self.contradiction_indices_list[0]
 
         # Load and freeze the lightweight sentence-embedding model for query-response
-        # cosine similarity scoring alongside DeBERTa-v3.
+        # cosine similarity scoring alongside the NLI sidecar ensemble.
         similarity_model_id = config.model.similarity_model_id
         self.similarity_tokenizer = AutoTokenizer.from_pretrained(similarity_model_id)
         self.similarity_model = AutoModel.from_pretrained(
@@ -159,22 +183,24 @@ class MedicalIntentEvaluator:
         for param in self.similarity_model.parameters():
             param.requires_grad = False
 
-        self.entail_index, self.contradiction_indices = self._resolve_nli_label_indices()
-
         self.calibration_report: Optional[CalibrationReport] = None
         self.utility_calibration_report: Optional[CalibrationReport] = None
         if run_calibration_check:
             self.calibration_report = self.run_calibration_sanity_check()
             self.utility_calibration_report = self.run_utility_calibration_sanity_check()
 
-    def _resolve_nli_label_indices(self) -> tuple[int, List[int]]:
+    def _resolve_nli_label_indices(
+        self,
+        model: Optional[Any] = None,
+    ) -> tuple[int, List[int]]:
         """
         Reads the entailment index (and the indices to normalise against) from the
         checkpoint's own `id2label`, so the score does not depend on a hardcoded
         label order. `neutral` is excluded from the softmax for 3-way MNLI heads,
         matching the standard zero-shot single-hypothesis formulation.
         """
-        id2label = getattr(self.model.config, "id2label", None) or {}
+        target_model = model if model is not None else self.model
+        id2label = getattr(target_model.config, "id2label", None) or {}
         normalised = {
             int(idx): str(label).strip().lower().replace("-", "_").replace(" ", "_")
             for idx, label in id2label.items()
@@ -188,7 +214,7 @@ class MedicalIntentEvaluator:
             elif label in ("neutral",):
                 neutral_indices.append(idx)
 
-        num_labels = int(self.model.config.num_labels)
+        num_labels = int(target_model.config.num_labels)
         if entail_index is None:
             # Both the zeroshot-v2.0 series and standard MNLI heads place entailment
             # at index 0; fall back to that when `id2label` is uninformative.
@@ -210,32 +236,40 @@ class MedicalIntentEvaluator:
         hypothesis: str,
     ) -> torch.Tensor:
         """
-        Scores each response as the NLI premise against `hypothesis` and returns the
-        raw logit at `self.entail_index`.
+        Scores each response as the NLI premise against `hypothesis` across all frozen
+        NLI models in the ensemble and returns the mean raw entailment logit.
         """
         if not responses:
             return torch.empty(0, dtype=torch.float32, device=self.device)
 
         premises = [r.strip() if r and r.strip() else "..." for r in responses]
         batch_size = max(1, self.config.model.evaluator_batch_size)
-        entail_logits: List[torch.Tensor] = []
 
-        for start in range(0, len(premises), batch_size):
-            chunk = premises[start : start + batch_size]
-            encoded = self.tokenizer(
-                chunk,
-                [hypothesis] * len(chunk),
-                padding=True,
-                truncation="only_first",
-                max_length=self.max_length,
-                return_tensors="pt",
-            ).to(self.device)
+        models = getattr(self, "models", None) or [self.model]
+        tokenizers = getattr(self, "tokenizers", None) or [self.tokenizer]
+        entail_indices = getattr(self, "entail_indices", None) or [self.entail_index]
 
-            # Cast logits to float32 and extract the raw entailment logit directly
-            logits = self.model(**encoded).logits.float()
-            entail_logits.append(logits[:, self.entail_index])
+        ensemble_logits: List[torch.Tensor] = []
+        for tokenizer, model, entail_idx in zip(tokenizers, models, entail_indices):
+            model_entail_logits: List[torch.Tensor] = []
+            for start in range(0, len(premises), batch_size):
+                chunk = premises[start : start + batch_size]
+                encoded = tokenizer(
+                    chunk,
+                    [hypothesis] * len(chunk),
+                    padding=True,
+                    truncation="only_first",
+                    max_length=self.max_length,
+                    return_tensors="pt",
+                ).to(self.device)
 
-        return torch.cat(entail_logits).to(self.device)
+                # Cast logits to float32 and extract the raw entailment logit directly
+                logits = model(**encoded).logits.float()
+                model_entail_logits.append(logits[:, entail_idx])
+
+            ensemble_logits.append(torch.cat(model_entail_logits).to(self.device))
+
+        return torch.stack(ensemble_logits, dim=0).mean(dim=0)
 
     def _sample_medical_hypothesis(self) -> str:
         """

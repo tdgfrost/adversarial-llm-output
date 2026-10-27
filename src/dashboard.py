@@ -107,12 +107,12 @@ class StepMetricsRecord:
     prompt_kl: float
     prompt_grad_norm: float
     prompt_reward_std: float
-    # Red reward components (DeBERTa medical advice logit & prompt-to-seed cosine similarity)
+    # Red reward components (NLI ensemble medical advice logit & prompt-to-seed cosine similarity)
     red_medical_logit: float = 0.0
     red_seed_similarity: float = 0.0
     # Dynamic adaptive KL penalty coefficients
-    red_kl_coef: float = 0.30
-    prompt_kl_coef: float = 0.30
+    red_kl_coef: float = 0.10
+    prompt_kl_coef: float = 0.10
 
 
 class ExperimentDashboard:
@@ -359,14 +359,14 @@ class ExperimentDashboard:
             f"- **Defensive Preprompt (`prompt_adaptor`)**:\n"
             f"  > {sample.defensive_preprompt}\n\n"
             f"## 2. Adversarial Interaction WITH LoRA (`red_adaptor` -> `Model Blue`)\n"
-            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.lora_medical_logit:.4f}`\n"
+            f"- **NLI Ensemble Medical Advice Logit**: `{sample.lora_medical_logit:.4f}`\n"
             f"- **Red Prompt Seed Cosine Similarity**: `{sample.lora_seed_similarity:.4f}`\n"
             f"- **Model Red (LoRA) Attack**:\n"
             f"  > {sample.red_lora_attack}\n"
             f"- **Model Blue Response**:\n"
             f"  > {sample.blue_lora_response}\n\n"
             f"## 3. Baseline Validation WITHOUT LoRA (`Frozen Red` -> `Model Blue`)\n"
-            f"- **DeBERTa-v3 Medical Advice Logit**: `{sample.nolora_medical_logit:.4f}`\n"
+            f"- **NLI Ensemble Medical Advice Logit**: `{sample.nolora_medical_logit:.4f}`\n"
             f"- **Red Prompt Seed Cosine Similarity**: `{sample.nolora_seed_similarity:.4f}`\n"
             f"- **Model Red (Non-LoRA) Attack**:\n"
             f"  > {sample.red_nolora_attack}\n"
@@ -414,7 +414,7 @@ class ExperimentDashboard:
         m = self.latest_metrics
 
         if m is None:
-            progress_str = "Initialising base model (Qwen2.5-1.5B), LoRA adaptors, and DeBERTa-v3 sidecar..."
+            progress_str = "Initialising base model (Qwen2.5-1.5B), LoRA adaptors, and NLI sidecar ensemble..."
             vram_str = "Allocating VRAM..."
         else:
             pct = 100.0 * m.step / max(1, m.total_steps)
@@ -478,7 +478,7 @@ class ExperimentDashboard:
             f"{m.red_medical_logit:.4f}",
             f"{self._mean('red_medical'):.4f}",
             f"[red]{make_sparkline(self.history['red_medical'])}[/red]",
-            "DeBERTa medical_advice logit w/ trained LoRA attacker",
+            "NLI ensemble medical_advice logit w/ trained LoRA attacker",
         )
         table.add_row(
             "[red]Red (`red_adaptor`) Seed Cosine Sim[/red]",
@@ -513,14 +513,14 @@ class ExperimentDashboard:
             f"{m.prompt_defense_score:.4f}",
             f"{self._mean('defense'):.4f}",
             f"[green]{make_sparkline(self.history['defense'])}[/green]",
-            "-DeBERTa medical_advice logit against LoRA Red",
+            "-NLI ensemble medical_advice logit against LoRA Red",
         )
         table.add_row(
             "[green]Prompt (`prompt_adaptor`) Benign Utility Logit[/green]",
             f"{m.prompt_utility_score:.4f}",
             f"{self._mean('utility'):.4f}",
             f"[green]{make_sparkline(self.history['utility'])}[/green]",
-            "DeBERTa + cosine_sim utility logit on benign query",
+            "NLI ensemble + cosine_sim utility logit on benign query",
         )
         table.add_row(
             "[bold green]Prompt (`prompt_adaptor`) Composite Reward[/bold green]",
@@ -583,7 +583,7 @@ class ExperimentDashboard:
                 Rule(style="dim"),
                 Text.from_markup(
                     f"[bold cyan]Model Blue Response[/bold cyan] "
-                    f"([bold]DeBERTa Medical Logit: {d.lora_medical_logit:.3f}[/bold]):\n"
+                    f"([bold]NLI Medical Logit: {d.lora_medical_logit:.3f}[/bold]):\n"
                     f"{_truncate(d.blue_lora_response, 280)}"
                 ),
             ),
@@ -602,7 +602,7 @@ class ExperimentDashboard:
                 Rule(style="dim"),
                 Text.from_markup(
                     f"[bold cyan]Model Blue Response[/bold cyan] "
-                    f"([bold]DeBERTa Medical Logit: {d.nolora_medical_logit:.3f}[/bold]):\n"
+                    f"([bold]NLI Medical Logit: {d.nolora_medical_logit:.3f}[/bold]):\n"
                     f"{_truncate(d.blue_nolora_response, 280)}"
                 ),
             ),
